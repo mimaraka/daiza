@@ -106,8 +106,9 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
     zoomOut,
   } = useViewport(contentBox, image?.id ?? null);
 
-  // 画像が変わったときだけ Canvas へ等倍で描き直す。putImageData は等倍描画のため
-  // Canvas 要素は自然解像度で持ち、拡縮は stage の transform に委ねる。
+  // 画像が変わったときだけ Canvas へ等倍で描き直す。Canvas 要素は自然解像度で持ち、
+  // 拡縮は stage の transform に委ねる。描画元はデコード済み ImageBitmap
+  // （drawImage は GPU 経由で速く、ImageData と違い React の state に安全に置ける）。
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !image) {
@@ -119,7 +120,7 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
     if (!ctx) {
       return;
     }
-    ctx.putImageData(image.imageData, 0, 0);
+    ctx.drawImage(image.bitmap, 0, 0);
   }, [image]);
 
   // 外形カットラインの曲線パス（d 属性）。折れ線ではなく Catmull-Rom で曲線補完して
@@ -349,19 +350,30 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
             </Button>
           </div>
 
-          {/* 解析中インジケータ。重い第 1 相は Web Worker で走るため UI は固まらないが、
+          {/* 解析中インジケータ。解析は Web Worker で走るため UI は固まらないが、
               結果が出るまで待ちであることを明示する（SPEC「解析中であることを表示する」）。
-              画素は触らず transform にも乗らない固定オーバーレイとして中央へ重ねる。 */}
-          {status === 'analyzing' && (
-            <div
-              role="status"
-              aria-live="polite"
-              className="text-muted-foreground bg-background/70 pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 backdrop-blur-sm"
-            >
-              <Loader2 className="size-8 animate-spin" />
-              <p className="text-sm font-medium">解析中…</p>
-            </div>
-          )}
+              まだ見せる結果が無い初回解析は全面オーバーレイで、結果を表示したままの
+              再計算（パラメータ変更）は前回オーバーレイを隠さない小さなバッジで示す。 */}
+          {status === 'analyzing' &&
+            (result ? (
+              <div
+                role="status"
+                aria-live="polite"
+                className="bg-background/80 text-muted-foreground pointer-events-none absolute top-2 right-2 flex items-center gap-1.5 rounded-md border px-2 py-1 shadow-sm backdrop-blur"
+              >
+                <Loader2 className="size-3.5 animate-spin" />
+                <span className="text-xs font-medium">更新中…</span>
+              </div>
+            ) : (
+              <div
+                role="status"
+                aria-live="polite"
+                className="text-muted-foreground bg-background/70 pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 backdrop-blur-sm"
+              >
+                <Loader2 className="size-8 animate-spin" />
+                <p className="text-sm font-medium">解析中…</p>
+              </div>
+            ))}
         </>
       ) : (
         <div className="text-muted-foreground flex flex-col items-center gap-2 text-center">

@@ -83,7 +83,6 @@ export const initialAppState: AppState = {
 export type AppAction =
   | { type: 'setImage'; image: FigureImage }
   | { type: 'clearImage' }
-  | { type: 'restoreImageData'; imageData: ImageData }
   | { type: 'updateParameters'; parameters: Partial<AnalysisParameters> }
   | { type: 'analysisStarted' }
   | { type: 'analysisSucceeded'; result: AnalysisResult }
@@ -115,26 +114,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         error: null,
       };
 
-    case 'restoreImageData':
-      // Web Worker へ転送した ImageData（メインスレッド側は detach 済み）を、解析後に
-      // 転送で戻ったバッファから再構築して差し戻す。id は据え置き、中身（imageData）だけを
-      // 入れ替える。これは新規読み込みではないので result/status/error は変更しない。
-      // 画像が無い（復元前に破棄された）場合は何もしない。
-      if (!state.image) {
-        return state;
-      }
-      return {
-        ...state,
-        image: { ...state.image, imageData: action.imageData },
-      };
-
     case 'updateParameters':
-      // パラメータ変更は再解析のトリガー。結果は次の解析で置き換わるまで残さない。
+      // パラメータ変更は再解析のトリガー。直前の結果は破棄せず、新しい解析結果が届く
+      // まで表示し続ける（再解析は Worker 非同期のため、破棄するとオーバーレイが
+      // 変更のたびに消えてちらつく）。結果を保持している場合のみ「再計算中」を示す
+      // analyzing へ進める。結果が無い状態（初回解析中・エラー表示中）は状態を保ち、
+      // 再解析の成否が届いた時点で置き換える（第 1 相失敗などで再解析自体が走らない
+      // ケースで、スピナーが出続けるのを防ぐ）。
       return {
         ...state,
         parameters: { ...state.parameters, ...action.parameters },
-        result: null,
-        error: null,
+        status: state.result ? 'analyzing' : state.status,
       };
 
     case 'analysisStarted':

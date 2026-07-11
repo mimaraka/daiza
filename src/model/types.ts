@@ -29,21 +29,30 @@ export type Contour = Point[];
 /**
  * ブラウザ内でデコード済みの入力画像。
  * プライバシー要件（外部送信禁止）のため、ピクセルデータはメモリ内のみで保持する。
+ *
+ * 重要：この型は React の state / props に載るため、**巨大な配列を own プロパティに
+ * 持つオブジェクト（ImageData 等）を含めてはならない**。Chrome では ImageData の
+ * `data`（数千万要素の Uint8ClampedArray）が own プロパティであり、React 19 の
+ * dev ビルド（Performance Tracks）が props 変更を performance.measure へシリアライズ
+ * する際に全要素を列挙してしまい、3000px 級で数十秒のフリーズと GB 級の GC を
+ * 起こすことが実測で確認された。解析用の RGBA ピクセルは React の外
+ * （model/pixelStore）で受け渡し、state には描画用の ImageBitmap だけを持たせる。
  */
 export interface FigureImage {
   /**
    * 読み込みごとに一意な識別子（読み込み時に採番）。
-   * 第 1 相解析を Web Worker 化した際、解析後に転送で戻った ImageData を state へ
-   * 復元すると `FigureImage` の参照は変わるが、それは「同じ画像の中身の入れ替え」で
-   * あって新規読み込みではない。この id を不変に保つことで、参照変化を新規画像と
-   * 誤認して第 1 相を再実行してしまうループを防ぐ（hooks/useAnalysis が id で判別する）。
+   * hooks/useAnalysis が「どの画像の解析か」を照合する鍵であり、pixelStore から
+   * 解析用ピクセルを引くための鍵でもある。
    */
   id: number;
   /** 元ファイル名。結果表示や SVG のダウンロード名に利用する。 */
   fileName: string;
-  /** Canvas から取得した RGBA ピクセルデータ。 */
-  imageData: ImageData;
-  /** ピクセル寸法。imageData と冗長だが、参照頻度が高いため展開して保持する。 */
+  /**
+   * プレビュー描画用のデコード済みビットマップ（drawImage で Canvas へ描く）。
+   * ImageData と違い巨大な own プロパティを持たないため React の state に置ける。
+   */
+  bitmap: ImageBitmap;
+  /** ピクセル寸法。 */
   width: number;
   height: number;
 }

@@ -14,12 +14,13 @@
 //    が良い。マスク構築（buildAlphaMask）は呼び出し側（pipeline）が重心走査と共有する
 //    ため、ここでは受け取るだけにして α 判定の全画素走査が二重にならないようにする。
 //  - 複数パーツは各 1 閉ポリゴンとして抽出し（extractContours）、カットライン化段階
-//    （buildCutline）で union（近接パーツの結合）と、なお分離したパーツ同士の最小幅ブリッジ
-//    連結により 1 枚のアクリル外形へまとめる（SPEC「複数パーツの連結」）。各パーツの輪郭は
-//    保ったまま連結するため、凸包のように全体を緩く包み込むことはしない。
+//    （buildCutline）で余白膨張（EDT）による近接パーツの自動結合と、なお分離したパーツ
+//    同士の最小幅ブリッジ連結により 1 枚のアクリル外形へまとめる（SPEC「複数パーツの連結」）。
+//    各パーツの輪郭は保ったまま連結するため、凸包のように全体を緩く包み込むことはしない。
 
 import polygonClipping, { type MultiPolygon, type Polygon, type Ring } from 'polygon-clipping';
 
+import { dilateMask } from '@/analysis/distance';
 import type { Contour, Point } from '@/model/types';
 import { convexHull, simplifyPolyline } from '@/utils/geometry';
 
@@ -269,96 +270,32 @@ export function extractContours(mask: Uint8Array, width: number, height: number)
 }
 
 // ---------------------------------------------------------------------------
-// カットライン生成：抽出した複数パーツ外形を「余白オフセット → union（自己交差除去・
-// 近接パーツ結合）→ 残った分離パーツの最小幅ブリッジ連結 → 平滑化」して、実際に切り出す
-// アクリル外形（カットライン）へ整える。
+// カットライン生成：αマスクを「余白ぶん膨張（EDT）→ 輪郭抽出 → 残った分離パーツの
+// 最小幅ブリッジ連結 → 平滑化」して、実際に切り出すアクリル外形（カットライン）へ整える。
 // SPEC「カットライン」節の手順。
 //
-// これらはパラメータ（余白 mm・平滑化強さ）に依存するため、画像不変の第 1 相
-// （extractContours）とは別に、パラメータ変更ごとに走る第 2 相（pipeline.runAnalysis）
-// から呼ばれる。頂点数は間引き済み外形（数百〜数千点）が入力なので O(頂点数) で軽い。
+// 余白オフセットは以前、間引き済みポリゴンへの素朴なミターオフセット＋ union（自己交差
+// 除去）で実装していたが、細かい凹凸（髪の毛等）を持つ 3000px 級の輪郭では自己交差が
+// 大量発生して union が超線形に爆発し（実測：12,000 頂点で約 2 秒・頂点数 2 倍で約 5 倍）、
+// フリーズ・メモリ枯渇の主因だった。現在は analysis/distance の EDT 膨張（真のオフセット）
+// を使う。膨張マスクの輪郭は構造的に自己交差せず、計算量 O(W×H) は形状の複雑さに依存
+// しない。パラメータ（余白 mm・平滑化強さ）に依存するため第 2 相（pipeline.runAnalysis）
+// から呼ばれるが、O(W×H) の重さがあるため呼び出し側でカットライン依存パラメータを鍵に
+// メモ化し、さらに Worker 上で実行してメインスレッドを塞がない。
 
 /**
  * Chaikin 反復で増えた頂点を間引く際の許容ずれ(px)。
  * 平滑化は角を丸めるため頂点が指数的に増える。見た目をほぼ保てる 0.5px で間引き、
- * 描画・SVG 文字列化を軽く保つ（第 1 相の 1px 間引きと役割は同じ）。
+ * 描画・SVG 文字列化を軽く保つ（輪郭抽出直後の 1px 間引きと役割は同じ）。
  */
 const CUTLINE_SIMPLIFY_EPSILON_PX = 0.5;
 
-/** 閉ポリゴンの符号付き面積の 2 倍。符号で頂点の並び向き（CW/CCW）を判定する。 */
-function signedDoubleArea(points: readonly Point[]): number {
-  const n = points.length;
-  let sum = 0;
-  for (let i = 0; i < n; i++) {
-    const a = points[i];
-    const b = points[(i + 1) % n];
-    if (!a || !b) {
-      continue;
-    }
-    sum += a.x * b.y - b.x * a.y;
-  }
-  return sum;
-}
-
 /**
- * 辺 a→b の外向き単位法線を返す。
- *
- * 辺方向 d=(dx,dy) を -90° 回した (dy,-dx) が、並び向き orient（符号付き面積の符号）に
- * 応じて外向きになる。これは座標系（画像は y 下向き）に依らず代数的に成り立つ規則で、
- * orient を掛けることで CW/CCW どちらの外形でも一貫して外側を向く。零長辺は (0,0)。
+ * 膨張マスクから追跡した輪郭を間引く際の許容ずれ(px)。
+ * Moore 追跡は境界ピクセル 1 個 = 1 頂点を返すため、後段（ブリッジ連結・平滑化・重心）へ
+ * 渡す前に画素段差ノイズを落とす。第 1 相の生外形と同じ 1px（視認不能・mm 換算で無視可能）。
  */
-function edgeOutwardNormal(a: Point, b: Point, orient: number): Point {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const nx = dy * orient;
-  const ny = -dx * orient;
-  const len = Math.hypot(nx, ny);
-  if (len < 1e-9) {
-    return { x: 0, y: 0 };
-  }
-  return { x: nx / len, y: ny / len };
-}
-
-/**
- * 閉ポリゴンを外側へ distancePx だけオフセットする。
- *
- * 各頂点を、前後 2 辺の外向き単位法線の平均方向へ移動させる（素朴なミターオフセット）。
- * 余白（数 mm 相当）は形状の特徴量に対して十分小さいため、鋭い凹角での自己交差は実用上
- * 問題にならず、後段の平滑化でさらに均される。distance が 0／非有限、または頂点数が
- * 3 未満（面積を持たない）なら入力をそのまま返す。
- */
-export function offsetContour(contour: readonly Point[], distancePx: number): Point[] {
-  const n = contour.length;
-  if (n < 3 || !Number.isFinite(distancePx) || distancePx === 0) {
-    return contour.slice();
-  }
-
-  const orient = signedDoubleArea(contour) >= 0 ? 1 : -1;
-  const out: Point[] = [];
-  for (let i = 0; i < n; i++) {
-    const prev = contour[(i - 1 + n) % n];
-    const cur = contour[i];
-    const next = contour[(i + 1) % n];
-    if (!prev || !cur || !next) {
-      continue;
-    }
-    const nIn = edgeOutwardNormal(prev, cur, orient);
-    const nOut = edgeOutwardNormal(cur, next, orient);
-    let nx = nIn.x + nOut.x;
-    let ny = nIn.y + nOut.y;
-    const len = Math.hypot(nx, ny);
-    if (len < 1e-9) {
-      // 前後の法線がほぼ相殺（尖った折り返し）。片側の法線で代用して破綻を避ける。
-      nx = nOut.x;
-      ny = nOut.y;
-    } else {
-      nx /= len;
-      ny /= len;
-    }
-    out.push({ x: cur.x + nx * distancePx, y: cur.y + ny * distancePx });
-  }
-  return out;
-}
+const TRACE_SIMPLIFY_EPSILON_PX = 1;
 
 /**
  * 閉ポリゴンを Chaikin の角切り法で平滑化する（iterations 回反復）。
@@ -621,12 +558,13 @@ function buildBridges(rings: readonly Point[][], widthPx: number): Point[][] {
 }
 
 /**
- * オフセット済みパーツ群から 1 枚のアクリル外形（カットライン）を求める。
+ * 膨張後もなお分離している複数パーツから 1 枚のアクリル外形（カットライン）を求める。
  *
- * SPEC「複数パーツの連結」「自己交差の回避」に対応する中核。手順は：
- * (1) union で各パーツの自己交差を正規化し、余白で重なった近接パーツを結合する。
- * (2) なお分離したパーツが残る場合、凸包で緩く包む代わりに、各パーツの輪郭を保ったまま
- *     最小幅 minBridgeWidthPx のブリッジ（MST で総延長最小）で連結し、再度 union で 1 枚へまとめる。
+ * SPEC「複数パーツの連結」に対応する中核。入力は膨張マスク由来の単純な（自己交差の
+ * ない）分離リング群で、手順は：
+ * (1) union でリング群を正規化する（分離入力なら実質素通しで軽量）。
+ * (2) 分離したパーツを、凸包で緩く包む代わりに、各パーツの輪郭を保ったまま最小幅
+ *     minBridgeWidthPx のブリッジ（MST で総延長最小）で連結し、再度 union で 1 枚へまとめる。
  * これにより外形は不透明領域の輪郭に沿い、連結部だけが最小幅の細い首になる。連結部を作れない
  * （幅 0 等）／数値誤差で連結し切れない／union が例外を投げる異常時は、パーツを分断させない
  * 安全網として凸包へフォールバックする（通常経路では発生しない）。
@@ -670,33 +608,48 @@ function envelopeFromParts(parts: readonly Point[][], minBridgeWidthPx: number):
 }
 
 /**
- * 抽出済みの複数パーツ外形から最終カットラインを生成する。
+ * αマスクから最終カットラインを生成する。
  *
- * SPEC「カットライン」節の手順を実装する：(1) 各パーツを余白ぶん外側へオフセット、
- * (2) union で自己交差を除去し近接パーツを結合、なお分離したパーツは最小幅
- * minBridgeWidthPx のブリッジで連結（残れば凸包で包絡）、(3) 平滑化、(4) 間引き。
- * 曲線補完（(5)）は折れ線を保ったまま描画層（overlay/SVG）が頂点列から曲線パスを起こす。
- * 以降の重心・台座計算・オーバーレイ・SVG はこの単一カットライン（が囲む領域）を外形として共有する。
+ * SPEC「カットライン」節の手順を実装する：(1) マスクを余白ぶん円板膨張（EDT による
+ * 真のオフセット。余白以内の近接パーツはここで自動的に結合される）、(2) 膨張マスクの
+ * 外周を抽出して間引き、なお分離したパーツは最小幅 minBridgeWidthPx のブリッジで連結
+ * （残れば凸包で包絡）、(3) 平滑化、(4) 間引き。曲線補完（(5)）は折れ線を保ったまま
+ * 描画層（overlay/SVG）が頂点列から曲線パスを起こす。以降の重心・台座計算・オーバーレイ・
+ * SVG はこの単一カットライン（が囲む領域）を外形として共有する。
  *
- * 有効パーツ（3 頂点以上）が無い退化入力では、最も頂点の多い生外形をそのまま返す（クラッシュ回避）。
+ * 膨張は画像枠の外（特に足元の下）へはみ出すため、返す頂点は負座標や画像寸法超の座標を
+ * 含み得る（膨張グリッドの原点ずれは元画像座標へ戻してから返す）。
+ * 有効パーツ（3 頂点以上）が皆無の退化入力では空配列を返す（呼び出し側でエラーへ写す）。
  */
 export function buildCutline(
-  rawContours: readonly Contour[],
+  mask: Uint8Array,
+  width: number,
+  height: number,
   marginPx: number,
   smoothing: number,
   minBridgeWidthPx: number,
 ): Contour {
-  const offsetParts = rawContours
-    .filter((c) => c.length >= 3)
-    .map((c) => offsetContour(c, marginPx))
-    .filter((c) => c.length >= 3);
+  // 余白ぶんの円板膨張。輪郭は構造的に自己交差しないため、以前のような union による
+  // 自己交差正規化は不要になる。
+  const dilated = dilateMask(mask, width, height, marginPx);
 
-  if (offsetParts.length === 0) {
-    const fallback = rawContours.reduce<Contour>((a, b) => (b.length > a.length ? b : a), []);
-    return fallback.slice();
+  // 膨張マスクの外周を抽出 → 画素段差を間引き → 膨張グリッドの原点ずれを元画像座標へ戻す。
+  const rings = extractContours(dilated.mask, dilated.width, dilated.height)
+    .map((c) => simplifyPolyline(c, TRACE_SIMPLIFY_EPSILON_PX))
+    .filter((c) => c.length >= 3)
+    .map((c) =>
+      dilated.offsetX === 0 && dilated.offsetY === 0
+        ? c
+        : c.map((p) => ({ x: p.x + dilated.offsetX, y: p.y + dilated.offsetY })),
+    );
+
+  if (rings.length === 0) {
+    return [];
   }
 
-  const base = envelopeFromParts(offsetParts, minBridgeWidthPx);
+  // 単一リングなら追跡結果そのままが外形（自己交差なしが保証されるため union 不要）。
+  // 複数リングが残った場合のみブリッジ連結（＋軽量な union）で 1 枚へまとめる。
+  const base = rings.length === 1 ? (rings[0] ?? []) : envelopeFromParts(rings, minBridgeWidthPx);
   const smoothed = smoothContour(base, smoothing);
   return simplifyPolyline(smoothed, CUTLINE_SIMPLIFY_EPSILON_PX);
 }

@@ -20,8 +20,6 @@ export interface AppStateActions {
   setImage: (image: FigureImage) => void;
   /** 画像を破棄して待機状態へ戻す。 */
   clearImage: () => void;
-  /** Worker 往復後の ImageData を現在の画像へ差し戻す（id 据え置き・結果は変えない）。 */
-  restoreImageData: (imageData: ImageData) => void;
   /** パラメータを部分更新する（再解析トリガー）。 */
   updateParameters: (parameters: Partial<AnalysisParameters>) => void;
   /** 解析開始を通知する。 */
@@ -47,10 +45,6 @@ export function useAppState(): UseAppStateReturn {
 
   const setImage = useCallback((image: FigureImage) => dispatch({ type: 'setImage', image }), []);
   const clearImage = useCallback(() => dispatch({ type: 'clearImage' }), []);
-  const restoreImageData = useCallback(
-    (imageData: ImageData) => dispatch({ type: 'restoreImageData', imageData }),
-    [],
-  );
   const updateParameters = useCallback(
     (parameters: Partial<AnalysisParameters>) => dispatch({ type: 'updateParameters', parameters }),
     [],
@@ -70,21 +64,12 @@ export function useAppState(): UseAppStateReturn {
     () => ({
       setImage,
       clearImage,
-      restoreImageData,
       updateParameters,
       startAnalysis,
       succeedAnalysis,
       failAnalysis,
     }),
-    [
-      setImage,
-      clearImage,
-      restoreImageData,
-      updateParameters,
-      startAnalysis,
-      succeedAnalysis,
-      failAnalysis,
-    ],
+    [setImage, clearImage, updateParameters, startAnalysis, succeedAnalysis, failAnalysis],
   );
 
   return { state, actions };

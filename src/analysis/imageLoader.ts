@@ -9,6 +9,7 @@
 // 失敗は例外で投げず、型付きの AnalysisError として返す。呼び出し側（UI）が
 // クラッシュせずにメッセージ表示へマッピングできるようにするため。
 
+import { depositPixels } from '@/model/pixelStore';
 import type { AnalysisError, AnalysisErrorKind, FigureImage } from '@/model/types';
 import { hasVisiblePixels } from '@/utils/image';
 
@@ -38,8 +39,8 @@ function fail(kind: ImageLoadErrorKind): ImageLoadResult {
 /**
  * 読み込みごとに単調増加する画像 id を採番する。
  * FigureImage.id は「どの読み込みか」を一意に指すだけでよく、値の意味は問わない。
- * Web Worker 往復後の ImageData 復元で参照が変わっても id は据え置くことで、
- * useAnalysis が「新規読み込み」と「中身の復元」を取り違えないようにする。
+ * useAnalysis の解析照合と、pixelStore（解析用ピクセルの React 外の受け渡し）の
+ * 鍵として使う。
  */
 let nextImageId = 0;
 
@@ -53,10 +54,15 @@ function looksLikePng(file: File): boolean {
 }
 
 /**
- * PNG ファイルを読み込み、RGBA の ImageData を持つ FigureImage を返す。
+ * PNG ファイルを読み込み、描画用 ImageBitmap を持つ FigureImage を返す。
  *
  * 手順：PNG 判定 → createImageBitmap でデコード → Canvas へ描画して
  * getImageData で RGBA ピクセルを取得 → 全透明チェック。
+ *
+ * RGBA ピクセル（ImageData）は戻り値に含めず pixelStore へ預ける：ImageData を
+ * React の state へ載せると dev ビルドの props シリアライズが picture 全画素を列挙して
+ * フリーズするため（model/types の FigureImage 注記参照）。解析側（useAnalysis）が
+ * 画像 id で一度だけ取り出して Worker へ転送する。
  */
 export async function loadPngFile(file: File): Promise<ImageLoadResult> {
   if (!looksLikePng(file)) {
@@ -90,23 +96,28 @@ export async function loadPngFile(file: File): Promise<ImageLoadResult> {
   }
 
   ctx.drawImage(bitmap, 0, 0);
-  // 描画済みなので bitmap のリソースは早めに解放する（大きな画像でのメモリ節約）。
-  bitmap.close();
 
   let imageData: ImageData;
   try {
     imageData = ctx.getImageData(0, 0, width, height);
   } catch {
     // 通常ローカル画像で汚染は起きないが、getImageData の失敗も握り潰さず扱う。
+    bitmap.close();
     return fail('imageLoadFailed');
   }
 
   if (!hasVisiblePixels(imageData)) {
+    bitmap.close();
     return fail('transparentImage');
   }
 
+  // bitmap はプレビュー描画用として FigureImage が長期保持する（close しない）。
+  // 解析用ピクセルは React を経由させず、id を鍵に pixelStore で受け渡す。
+  const id = nextImageId++;
+  depositPixels(id, imageData);
+
   return {
     ok: true,
-    image: { id: nextImageId++, fileName: file.name, imageData, width, height },
+    image: { id, fileName: file.name, bitmap, width, height },
   };
 }
