@@ -74,14 +74,16 @@ export function ResultPanel({ result, safetyFactor }: ResultPanelProps) {
         <CardTitle>解析結果</CardTitle>
       </CardHeader>
       <CardContent>
-        <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+        {/* 広幅では右列（縦長・幅の狭い1カラム）に置かれるため lg 以上は1列へ戻す。
+            狭幅で縦積みになるときだけ2列にして、縦方向の間延びを抑える。 */}
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-1">
           {rows.map((row) => (
             <div
               key={row.label}
               className="flex items-baseline justify-between gap-2 border-b py-1 last:border-b-0"
             >
               <dt className="text-muted-foreground text-sm">{row.label}</dt>
-              <dd className="text-sm font-medium tabular-nums">{row.value}</dd>
+              <dd className="text-sm font-medium tabular-nums whitespace-nowrap">{row.value}</dd>
             </div>
           ))}
         </dl>

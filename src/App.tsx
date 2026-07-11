@@ -93,7 +93,9 @@ function App() {
         <p className="text-muted-foreground text-sm">アクリルフィギュア台座設計ツール</p>
       </header>
 
-      {/* 画面が広ければ左右2ペイン、狭ければ上下配置へ切り替える（レスポンシブ）。 */}
+      {/* 画面が広ければ3ペイン（左パネル／プレビュー／結果パネル）、狭ければ上下配置へ
+          切り替える（レスポンシブ）。結果をプレビューの下ではなく右列へ置くのは、16:9 等の
+          横長ウィンドウでプレビューの縦幅が圧迫されるのを避けるため（SPEC「解析結果パネルの配置」）。 */}
       <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4 lg:flex-row lg:overflow-hidden">
         {/* 左パネル：狭幅では先頭に積み、広幅では固定幅の縦スクロール列にする。 */}
         <aside className="shrink-0 lg:w-96 lg:overflow-y-auto">
@@ -107,8 +109,10 @@ function App() {
           />
         </aside>
 
-        {/* 右側：プレビューを主役に伸ばし、その下へ結果一覧を置く。 */}
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 lg:overflow-hidden">
+        {/* 中央：プレビュー。残りの幅・高さを使い切る主役の列。エラー表示はプレビューの
+            操作（読み込み・パラメータ変更）に対する応答なので、この列の上部に置く。
+            狭幅で縦積みになったときにプレビューが潰れないよう最低高さを与える。 */}
+        <section className="flex min-h-[60vh] min-w-0 flex-1 flex-col gap-4 lg:min-h-0 lg:overflow-hidden">
           {state.error && (
             <div
               role="alert"
@@ -124,8 +128,12 @@ function App() {
             status={state.status}
             onImageFile={handleImageFile}
           />
-          <ResultPanel result={state.result} safetyFactor={state.parameters.safetyFactor} />
         </section>
+
+        {/* 右パネル：解析結果。左パネルと同じく固定幅・列内スクロール。 */}
+        <aside className="shrink-0 lg:w-80 lg:overflow-y-auto">
+          <ResultPanel result={state.result} safetyFactor={state.parameters.safetyFactor} />
+        </aside>
       </main>
     </div>
   );
