@@ -287,6 +287,22 @@
       （`lg:grid-cols-1` で右列では1列へ戻し、値は `whitespace-nowrap` で折り返さない）
 - [x] エラー表示（`state.error` のアラート）の置き場所を再確認する（プレビュー列の上部のまま）
 
+## 23. ルーラーの原点を実寸座標系へ（仕様変更）
+
+ルーラーの目盛りが画像左上を 0 としていたため、読み取った値が実寸の意味を持たなかった。
+原点を **(X, Y) = (重心の X 座標, 台座の底面)** にとり、Y は上を正とする（`docs/SPEC.md`
+「ルーラー」節 更新済み）。
+
+- [x] `render/ruler.ts` の `buildRulerTicks` に `direction`（+1 / -1）を追加し、変換式を
+      `screen = originPx + direction × mm × pxPerMm` へ一般化する（可視範囲の逆算は
+      direction = -1 で大小が入れ替わるため両端を min/max で取り直す）
+- [x] `formatTickLabel` を負値対応にする（`-0` を `0` へ寄せる）
+- [x] `components/Ruler.tsx` に `origin`（実寸原点の画像ピクセル座標）を渡し、原点のスクリーン
+      位置を `t + scale × originPixel` で算出する。垂直ルーラーは `direction = -1`（上が正）
+- [x] `components/Preview.tsx` が原点を算出する：X = `overlay.centroid.center.x`、
+      Y = `overlay.base.y + overlay.base.height`（台座矩形の下辺＝接地面）。解析前は
+      原点が定まらないため画像左下（`{ x: 0, y: image.height }`）を仮の原点とする
+
 ## 将来拡張（バックログ）
 
 - [ ] 複数差込口

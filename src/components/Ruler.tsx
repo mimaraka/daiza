@@ -7,10 +7,15 @@
 // 導いた「mm → スクリーン px」の 1 次式で目盛り位置を計算することで、ズーム・パンに
 // 追従させる。全体を pointer-events-none にして、下のプレビューが受け取るドラッグパン・
 // ホイールズームを一切妨げないようにする（SPEC「操作対象を妨げないこと」）。
+//
+// 目盛りの基準は画像の左上ではなく、呼び出し側が渡す実寸座標系の原点（＝台座底面の
+// 重心真下）とする。Y は「上を正」の物理的な高さとして読めるよう画像ピクセル座標
+// （下方向 +Y）と逆向きに刻む（SPEC「ルーラー」）。
 
 import { useMemo } from 'react';
 
 import type { ViewportTransform } from '@/hooks/useViewport';
+import type { Point } from '@/model/types';
 import { buildRulerTicks, formatTickLabel } from '@/render/ruler';
 
 /**
@@ -31,24 +36,32 @@ export interface RulerProps {
   /** ビューポート（プレビュー領域）の実サイズ(px)。 */
   width: number;
   height: number;
-  /** 現在のズーム/パン変換。目盛りの原点・間隔はここから導く。 */
+  /** 現在のズーム/パン変換。目盛りの間隔・画面上の位置はここから導く。 */
   transform: ViewportTransform;
   /** スケール換算係数(mm/px)。目盛りを実寸(mm)にするために必要。 */
   mmPerPixel: number;
+  /** 実寸座標系の原点（0, 0）に対応する画像ピクセル座標。 */
+  origin: Point;
 }
 
-export function Ruler({ width, height, transform, mmPerPixel }: RulerProps) {
+export function Ruler({ width, height, transform, mmPerPixel, origin }: RulerProps) {
   // 1mm あたりのスクリーン px。ズーム率とスケールの合成で決まる（render/ruler 参照）。
   const pxPerMm = transform.scale / mmPerPixel;
 
-  // 目盛りはズーム/パン（tx, ty, scale）とビューポートサイズにのみ依存する。
+  // 原点のスクリーン位置。useViewport の変換（screen = t + scale × contentPixel）を
+  // 原点の画像ピクセル座標へ適用したもの。
+  const originScreenX = transform.tx + transform.scale * origin.x;
+  const originScreenY = transform.ty + transform.scale * origin.y;
+
+  // 目盛りは原点のスクリーン位置・ズーム率・ビューポートサイズにのみ依存する。
+  // 垂直側は direction = -1：画面の上（Y が小さい側）ほど mm が増える「上を正」の軸。
   const horizontal = useMemo(
-    () => buildRulerTicks(width, transform.tx, pxPerMm),
-    [width, transform.tx, pxPerMm],
+    () => buildRulerTicks(width, originScreenX, pxPerMm),
+    [width, originScreenX, pxPerMm],
   );
   const vertical = useMemo(
-    () => buildRulerTicks(height, transform.ty, pxPerMm),
-    [height, transform.ty, pxPerMm],
+    () => buildRulerTicks(height, originScreenY, pxPerMm, -1),
+    [height, originScreenY, pxPerMm],
   );
 
   // スケール未確定（画像高さ 0 等で mmPerPixel が NaN）なら実寸目盛りを描けない。

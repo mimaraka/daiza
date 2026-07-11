@@ -24,7 +24,7 @@ import { buildOverlayShapes } from '@/render/overlay';
 import { buildSimulationShapes } from '@/render/simulation';
 import { useViewport, type ContentBox } from '@/hooks/useViewport';
 import type { AnalysisStatus } from '@/model/state';
-import type { AnalysisResult, FigureImage } from '@/model/types';
+import type { AnalysisResult, FigureImage, Point } from '@/model/types';
 import { cn } from '@/lib/utils';
 import { closedCurvePathData } from '@/utils/curve';
 import { radToDeg } from '@/utils/geometry';
@@ -107,6 +107,17 @@ export function Preview({ image, result, mmPerPixel, status, onImageFile }: Prev
     include(overlay.plumb.to.x, overlay.plumb.to.y);
     return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
   }, [image, overlay]);
+
+  // ルーラーの原点（画像ピクセル座標）。実寸座標系は「重心の真下・台座の底面（＝接地面）」を
+  // 原点にとるため、X は重心、Y は台座矩形の下辺に合わせる（SPEC「ルーラー」）。解析前は
+  // まだ台座も重心も定まらないので、接地面に相当する画像下端・画像左端を仮の原点として
+  // 目盛り自体は出しておく（スケール mm/px は解析を待たずに決まる）。
+  const rulerOrigin = useMemo<Point>(() => {
+    if (!overlay) {
+      return { x: 0, y: image?.height ?? 0 };
+    }
+    return { x: overlay.centroid.center.x, y: overlay.base.y + overlay.base.height };
+  }, [overlay, image]);
 
   // 表示操作（ズーム/パン/Fit/100%）。自動フィットは画像の同一性（id）で制御し、
   // パラメータ変更（box の変化）ではユーザーのズーム/パンを保つ。
@@ -343,6 +354,7 @@ export function Preview({ image, result, mmPerPixel, status, onImageFile }: Prev
               height={containerSize.height}
               transform={transform}
               mmPerPixel={mmPerPixel}
+              origin={rulerOrigin}
             />
           )}
 

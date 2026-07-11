@@ -4,17 +4,19 @@
 // 色・太さ・ラベル体裁は描画層（components/Ruler）に委ねる（overlay.ts と同じ責務分離）。
 //
 // 座標変換：ビューポート（画面）座標と実寸(mm)の関係は 1 本の 1 次式で表せる。
-// 画像ピクセル座標 0 が mm 座標の 0（画像左上）に対応し、useViewport の変換が
+// useViewport の変換が
 //
 //   screen = t + scale × contentPixel   （t は tx または ty）
-//   contentPixel = mm / mmPerPixel
 //
-// なので、
+// であり、mm 座標の原点に対応する画像ピクセル位置を originPixel、+mm 方向が画面の
+// +方向と一致するかを direction（+1 / -1）で表すと、
 //
-//   screen = originPx + mm × pxPerMm    （originPx = t、pxPerMm = scale / mmPerPixel）
+//   screen = originPx + direction × mm × pxPerMm
+//     （originPx = t + scale × originPixel、pxPerMm = scale / mmPerPixel）
 //
-// となる。水平・垂直で軸が違うだけで式は同型のため、本モジュールは軸を区別せず
-// 「1 次元の目盛り列」を返し、描画層が X 軸・Y 軸へ割り当てる。
+// となる。direction を持たせているのは、実寸座標系の Y が「上を正」で画像ピクセル座標
+// （下方向 +Y）と逆向きだから（SPEC「ルーラー」）。水平・垂直で軸が違うだけで式は同型の
+// ため、本モジュールは軸を区別せず「1 次元の目盛り列」を返し、描画層が X 軸・Y 軸へ割り当てる。
 
 /** ルーラーの目盛り 1 本。 */
 export interface RulerTick {
@@ -68,14 +70,20 @@ export function chooseMajorStepMm(pxPerMm: number): number {
 /**
  * 1 軸ぶんの目盛り列を作る。
  *
- * lengthPx はビューポートのその軸方向の長さ、originPx は mm 座標 0 のスクリーン位置
- * （useViewport の tx / ty）、pxPerMm は 1mm あたりのスクリーン px（scale / mmPerPixel）。
+ * lengthPx はビューポートのその軸方向の長さ、originPx は mm 座標 0 のスクリーン位置、
+ * pxPerMm は 1mm あたりのスクリーン px（scale / mmPerPixel）、direction は +mm 方向が
+ * 画面の +方向（右・下）と一致するなら +1、逆向きなら -1（＝上を正とする Y 軸）。
  * 可視範囲に入る目盛りだけを返すため、ズーム・パンに追従して自然に増減する。
  *
  * 副目盛りは主目盛りを MINOR_DIVISIONS 等分した位置に置くが、間隔が潰れる（線が密集して
  * 帯になる）場合は主目盛りのみとする。入力が不正（非正の長さ・スケール）なら空配列を返す。
  */
-export function buildRulerTicks(lengthPx: number, originPx: number, pxPerMm: number): RulerTick[] {
+export function buildRulerTicks(
+  lengthPx: number,
+  originPx: number,
+  pxPerMm: number,
+  direction: 1 | -1 = 1,
+): RulerTick[] {
   if (!(lengthPx > 0) || !Number.isFinite(originPx) || !(pxPerMm > 0)) {
     return [];
   }
@@ -86,18 +94,20 @@ export function buildRulerTicks(lengthPx: number, originPx: number, pxPerMm: num
   const drawMinor = minorStep * pxPerMm >= MIN_MINOR_SPACING_PX;
   const step = drawMinor ? minorStep : majorStep;
 
-  // 可視範囲を mm へ逆算し、その中に入る刻み位置だけを列挙する。
-  const startMm = -originPx / pxPerMm;
-  const endMm = (lengthPx - originPx) / pxPerMm;
-  const firstIndex = Math.ceil(startMm / step);
-  const lastIndex = Math.floor(endMm / step);
+  // 可視範囲の両端を mm へ逆算し、その中に入る刻み位置だけを列挙する。direction = -1 では
+  // 画面の上端側が大きい mm になり大小が入れ替わるため、min/max で取り直してから走査する。
+  const toMm = (screen: number): number => (direction * (screen - originPx)) / pxPerMm;
+  const nearEdgeMm = toMm(0);
+  const farEdgeMm = toMm(lengthPx);
+  const firstIndex = Math.ceil(Math.min(nearEdgeMm, farEdgeMm) / step);
+  const lastIndex = Math.floor(Math.max(nearEdgeMm, farEdgeMm) / step);
 
   const ticks: RulerTick[] = [];
   for (let i = firstIndex; i <= lastIndex && ticks.length < MAX_TICKS; i++) {
     const mm = i * step;
     ticks.push({
       mm,
-      position: originPx + mm * pxPerMm,
+      position: originPx + direction * mm * pxPerMm,
       // 副目盛りを刻んでいる場合、MINOR_DIVISIONS の倍数番目が主目盛りにあたる。
       major: !drawMinor || i % MINOR_DIVISIONS === 0,
     });
@@ -109,7 +119,10 @@ export function buildRulerTicks(lengthPx: number, originPx: number, pxPerMm: num
  * 主目盛りのラベル文字列。
  * 刻みが 1mm 未満まで細かくなることは無い（候補の最小が 1mm）ため整数表記で足りるが、
  * 浮動小数の誤差（29.999999…）を出さないよう丸めてから文字列化する。
+ * 原点より手前（左・下）は負値になるため符号もそのまま出す。ただし丸めで生じる -0 は
+ * 「-0」と表示されないよう 0 に寄せる。
  */
 export function formatTickLabel(mm: number): string {
-  return String(Math.round(mm));
+  const rounded = Math.round(mm);
+  return String(rounded === 0 ? 0 : rounded);
 }
