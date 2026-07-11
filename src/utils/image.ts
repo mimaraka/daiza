@@ -53,3 +53,37 @@ export function buildAlphaMask(imageData: ImageData): Uint8Array {
   }
   return mask;
 }
+
+/** 不透明領域（α>0）が存在する行の範囲。 */
+export interface RowRange {
+  /** 最も上の不透明画素の行 Y。 */
+  minY: number;
+  /** 最も下の不透明画素の行 Y。 */
+  maxY: number;
+}
+
+/**
+ * α マスクから不透明領域（＝絵柄）の上端・下端の行を求める。存在しなければ null。
+ *
+ * スケール（mm/px）は画像高さではなく**絵柄の高さ**を基準に取る（SPEC「フィギュア高さ」）。
+ * PNG の透明余白の量でフィギュアの実寸が変わってしまわないようにするためであり、この行範囲が
+ * その基準になる。同時に「不透明画素が 1 つも無い（全透明画像）」の検査も兼ねるので、
+ * 全画素走査は解析全体で 1 回に収まる。
+ */
+export function opaqueRowRange(mask: Uint8Array, width: number, height: number): RowRange | null {
+  let minY = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (mask[row + x] === 1) {
+        if (minY < 0) {
+          minY = y;
+        }
+        maxY = y;
+        break;
+      }
+    }
+  }
+  return minY < 0 ? null : { minY, maxY };
+}

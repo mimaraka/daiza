@@ -6,25 +6,53 @@
 //
 // React には依存しない純粋ロジック。
 
-import type { Point, Size } from '@/model/types';
+import type { AnalysisParameters, Point, Size } from '@/model/types';
+
+/** スケール算出に必要なパラメータだけを抜き出した最小の入力。 */
+export type ScaleParameters = Pick<
+  AnalysisParameters,
+  'figureHeightMm' | 'cutLineMarginMm' | 'plateLiftMm' | 'thicknessMm'
+>;
+
+/**
+ * フィギュア高さのうち、絵柄（不透明領域）そのものではない部分の実寸(mm)。
+ *
+ * フィギュア高さは「接地面（台座底面）から**カットライン**（絵柄＋余白）の上端まで」の
+ * 全高なので、絵柄の上下にそれぞれ次の高さが乗る：
+ *   上：カットライン余白（絵柄の上端より上へ外形が広がるぶん）
+ *   下：カットライン余白 ＋ アクリル板の持ち上げ量 ＋ 板厚（＝台座の厚み＝ツメ深さ）
+ * スケール算出ではこの合計を差し引いて、絵柄そのものの高さ(mm)を得る。
+ */
+export function computeOutsideArtworkMm(params: ScaleParameters): number {
+  return 2 * params.cutLineMarginMm + params.plateLiftMm + params.thicknessMm;
+}
 
 /**
  * mm/px 換算係数を求める。
  *
- * SPEC の定義どおり「フィギュア高さ(mm)を画像高さ(px)で割る」ことで、
- * 1 ピクセルが実寸で何 mm に相当するかを得る。高さを基準にするのは、
- * フィギュア高さがユーザーの与える唯一の実寸情報だからである。
+ * SPEC の定義では、フィギュア高さは**接地面（台座底面）からカットライン（絵柄＋余白）の
+ * 上端まで**の全高である（＝ルーラーの Y 原点が接地面なので、カットライン上端の目盛りが
+ * そのままフィギュア高さになる）。一方でピクセルで測れるのは絵柄の上端〜下端だけなので、
  *
- * 前提：figureHeightMm・imageHeightPixels はいずれも正。上流の
- * PARAMETER_CONSTRAINTS（高さ ≥ 1）と画像読み込み（高さ > 0）で保証される。
- * 万一 0 以下が来た場合はゼロ除算・不正値を下流へ伝播させないため、
- * 計算不能を示す NaN を返し、呼び出し側で弾けるようにする。
+ *   フィギュア高さ = 絵柄の高さ + 絵柄の外側の高さ（余白×2 + 持ち上げ量 + 板厚）
+ *
+ * を解いて mm/px を得る。画像高さではなく絵柄の高さを基準にするのは、PNG の透明余白の
+ * 量でフィギュアの実寸が変わってしまわないようにするためでもある。
+ *
+ * figureHeightPixels は絵柄の上端・下端の**点間距離**（maxY − minY）であり、画素数
+ * （+1）ではない。カットライン・台座・ルーラーがすべて同じ点座標系で位置を測るため、
+ * こちらを使うとルーラーの読みと指定値が一致する。
+ *
+ * 差し引き後の絵柄高さが 0 以下（フィギュア高さが絵柄の外側の高さ以下）や、絵柄が高さを
+ * 持たない退化入力では、ゼロ除算・不正値を下流へ伝播させないため計算不能を示す NaN を返し、
+ * 呼び出し側で型付きエラーへ写す。
  */
-export function computeMmPerPixel(figureHeightMm: number, imageHeightPixels: number): number {
-  if (figureHeightMm <= 0 || imageHeightPixels <= 0) {
+export function computeMmPerPixel(params: ScaleParameters, figureHeightPixels: number): number {
+  const artworkHeightMm = params.figureHeightMm - computeOutsideArtworkMm(params);
+  if (!(artworkHeightMm > 0) || !(figureHeightPixels > 0)) {
     return Number.NaN;
   }
-  return figureHeightMm / imageHeightPixels;
+  return artworkHeightMm / figureHeightPixels;
 }
 
 /** ピクセル長を実寸(mm)へ換算する。 */

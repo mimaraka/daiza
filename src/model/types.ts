@@ -62,7 +62,14 @@ export interface FigureImage {
  * これらの変更が「解析 → 状態更新 → 再描画」パイプラインのトリガーになる。
  */
 export interface AnalysisParameters {
-  /** フィギュア高さ(mm)。画像高さ(px)と合わせてスケール換算に使う。 */
+  /**
+   * フィギュア高さ(mm)。**接地面（台座の底面）からカットライン（絵柄＋余白）の上端まで**の
+   * 全高。ルーラーの Y 原点が接地面なので、カットライン上端の目盛りがそのままこの値になる
+   * （SPEC「フィギュア高さ」）。スケール(mm/px)は、この全高から絵柄の外側の高さ
+   * （カットライン余白×2＋持ち上げ量＋板厚）を差し引いた「絵柄の高さ(mm)」を、絵柄の
+   * 高さ(px) で割って求める（analysis/scale の computeMmPerPixel）。画像高さではなく
+   * 絵柄の高さを基準にすることで、PNG の透明余白の量で実寸が変わらないようにしている。
+   */
   figureHeightMm: number;
   /** アクリル板の板厚(mm)。差込口の奥行・SVG 生成に影響する。 */
   thicknessMm: number;
@@ -85,7 +92,9 @@ export interface AnalysisParameters {
    * アクリルで充填する（分離パーツ間の隙間にも、同一パーツ内のくびれにも働く）。
    * 実装は半径 = 閾値/2 の円板によるモルフォロジカルクロージング（膨張→収縮）で、
    * 「半径 r の円板が入り込めない隙間」だけが円弧でなめらかに埋まる
-   * （analysis/distance の closeMask を analysis/contour の buildCutline が使用）。
+   * （analysis/distance の closeMask を analysis/contour の cutlineFromMask が使用）。
+   * 充填は差込部の首部を合流させた後のマスクに対して行うため、首部の側面とフィギュア
+   * 外形の間にできる狭い隙間も対象になる（SPEC「隙間埋めと差込部の整合」）。
    */
   gapFillThresholdMm: number;
   /**
@@ -93,7 +102,7 @@ export interface AnalysisParameters {
    * 複数パーツに分かれる場合、凸包で緩く包むのではなく各パーツの輪郭に沿わせたまま
    * 細い連結部（ブリッジ）で 1 枚のアクリルにまとめる。連結部が細すぎるとアクリルの
    * 耐久性が落ちるため、連結部の幅がこの値を下回らないようにする。単一パーツ画像では
-   * 連結が発生しないため影響しない（analysis/contour の buildCutline が使用）。
+   * 連結が発生しないため影響しない（analysis/contour の cutlineFromMask が使用）。
    */
   minBridgeWidthMm: number;
   /** 差込口幅(mm)。差込部のうち台座スリットへ挿す「ツメ」の幅にあたる。 */
@@ -237,6 +246,7 @@ export type AnalysisErrorKind =
   | 'imageLoadFailed' // PNG 読み込み失敗
   | 'unsupportedImage' // 非対応画像（RGBA でない等）
   | 'transparentImage' // 全透明でアクリル領域が存在しない
+  | 'scaleCalculationFailed' // スケール計算不可（フィギュア高さが接地面までのオフセット以下）
   | 'slotPlacementFailed' // 差込口が配置不可
   | 'baseCalculationFailed' // 台座計算不可（重心が支持範囲外等）
   | 'unexpectedError'; // 想定外の例外（バグ等）の受け皿。クラッシュさせず表示する

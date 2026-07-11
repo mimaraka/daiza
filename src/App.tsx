@@ -65,19 +65,22 @@ function App() {
     [actions],
   );
 
-  // プレビューのルーラーは実寸(mm)目盛りのためスケールを要する。解析結果を待たずに
-  // フィギュア高さと画像高さだけで決まる値なので、ここで導いて渡す（解析中・失敗中でも
-  // ルーラーが消えない）。解析側と同じ computeMmPerPixel を使い、換算規則を一本化する。
-  const image = state.image;
-  const figureHeightMm = state.parameters.figureHeightMm;
-  const mmPerPixel = useMemo(
-    () => (image ? computeMmPerPixel(figureHeightMm, image.height) : null),
-    [image, figureHeightMm],
-  );
-
   // SVG エクスポート：解析結果がある時のみ有効。undefined を渡すと LeftPanel の
   // ボタンが自動で無効化されるため、結果の有無で export ハンドラを出し分ける。
   const result = state.result;
+
+  // プレビューのルーラーは実寸(mm)目盛りのためスケールを要する。スケールは絵柄（不透明
+  // 領域）の高さを基準にするため解析（第 1 相）を経ないと確定しないが、解析中・失敗中でも
+  // ルーラーを消さないよう、結果が無い間は「絵柄が画像いっぱいに広がっている」と仮定した
+  // 暫定スケールで代用する（原点も解析前は画像左下の仮置き。SPEC「ルーラー」）。
+  const image = state.image;
+  const parameters = state.parameters;
+  const mmPerPixel = useMemo(() => {
+    if (result) {
+      return result.mmPerPixel;
+    }
+    return image ? computeMmPerPixel(parameters, image.height) : null;
+  }, [result, image, parameters]);
   const handleExportSvg = useCallback(() => {
     if (!result) {
       return;

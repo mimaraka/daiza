@@ -14,14 +14,14 @@
 //    が良い。マスク構築（buildAlphaMask）は呼び出し側（pipeline）が重心走査と共有する
 //    ため、ここでは受け取るだけにして α 判定の全画素走査が二重にならないようにする。
 //  - 複数パーツは各 1 閉ポリゴンとして抽出し（extractContours）、カットライン化段階
-//    （buildCutline）で余白膨張（EDT）による近接パーツの自動結合と、なお分離したパーツ
+//    （cutlineFromMask）で余白膨張（EDT）による近接パーツの自動結合と、なお分離したパーツ
 //    同士の最小幅ブリッジ連結により 1 枚のアクリル外形へまとめる（SPEC「複数パーツの連結」）。
 //    各パーツの輪郭は保ったまま連結するため、凸包のように全体を緩く包み込むことはしない。
 
 import polygonClipping, { type MultiPolygon, type Polygon, type Ring } from 'polygon-clipping';
 
-import { closeMask, dilateMask } from '@/analysis/distance';
-import type { Contour, Point, SlotResult } from '@/model/types';
+import { closeMask, dilateMask, type DilatedMask } from '@/analysis/distance';
+import type { Contour, Point, SlotRect, SlotResult } from '@/model/types';
 import { convexHull, simplifyPolyline } from '@/utils/geometry';
 
 /**
@@ -282,6 +282,12 @@ export function extractContours(mask: Uint8Array, width: number, height: number)
 // しない。パラメータ（余白 mm・平滑化強さ）に依存するため第 2 相（pipeline.runAnalysis）
 // から呼ばれるが、O(W×H) の重さがあるため呼び出し側でカットライン依存パラメータを鍵に
 // メモ化し、さらに Worker 上で実行してメインスレッドを塞がない。
+//
+// 生成は「膨張マスク（buildCutlineMask）」と「マスク → 輪郭（cutlineFromMask）」の 2 段に
+// 分かれている。差込部（首部）の位置は重心＝カットラインが決まらないと定まらないのに、
+// 隙間埋めは首部を含んだ最終形状に対して掛けねばならない（首部の側面とフィギュア外形の
+// 間にできる狭い隙間も充填対象）。そこで膨張マスクを共有したまま、首部を塗り足した
+// マスクからカットラインを起こし直せるようにしてある。
 
 /**
  * Chaikin 反復で増えた頂点を間引く際の許容ずれ(px)。
@@ -302,7 +308,7 @@ const TRACE_SIMPLIFY_EPSILON_PX = 1;
  *
  * 各辺を 1/4・3/4 の内分点 2 つへ置き換えて角を落とすため、反復ごとに輪郭が滑らかになる。
  * SPEC「値を大きくするほど滑らか」に対応し、iterations=0 は素通し（無効）。反復ごとに頂点が
- * 倍増するので、呼び出し側（buildCutline）で最後に間引いて頂点数を抑える。
+ * 倍増するので、呼び出し側（cutlineFromMask）で最後に間引いて頂点数を抑える。
  */
 export function smoothContour(contour: readonly Point[], iterations: number): Point[] {
   let points: Point[] = contour.slice();
@@ -608,41 +614,145 @@ function envelopeFromParts(parts: readonly Point[][], minBridgeWidthPx: number):
 }
 
 /**
- * αマスクから最終カットラインを生成する。
+ * カットラインの元になる「余白ぶん膨張したマスク」を作る（SPEC「カットライン」手順 1〜2）。
  *
- * SPEC「カットライン」節の手順を実装する：(1) マスクを余白ぶん円板膨張（EDT による
- * 真のオフセット。余白以内の近接パーツはここで自動的に結合される）、(2) 閾値 gapFillPx
- * より狭い隙間を半径 gapFillPx/2 の円板クロージングで充填、(3) マスクの外周を抽出して
- * 間引き、なお分離したパーツは最小幅 minBridgeWidthPx のブリッジで連結（残れば凸包で
- * 包絡）、(4) 平滑化、(5) 間引き。曲線補完（(6)）は折れ線を保ったまま描画層
- * （overlay/SVG）が頂点列から曲線パスを起こす。以降の重心・台座計算・オーバーレイ・
- * SVG はこの単一カットライン（が囲む領域）を外形として共有する。
- *
- * 膨張は画像枠の外（特に足元の下）へはみ出すため、返す頂点は負座標や画像寸法超の座標を
- * 含み得る（膨張グリッドの原点ずれは元画像座標へ戻してから返す）。
- * 有効パーツ（3 頂点以上）が皆無の退化入力では空配列を返す（呼び出し側でエラーへ写す）。
+ * 膨張は画像枠の外（特に足元の下）へはみ出すため、グリッドはパディングぶん広く、原点が
+ * ずれている（DilatedMask.offsetX/offsetY で元画像座標へ戻す）。スケールと余白だけに
+ * 依存する最も重い段（O(W×H)）なので、呼び出し側はこの結果を使い回し、隙間埋め・平滑化
+ * だけが変わる再解析や、差込部を描き込んだ 2 回目のカットライン生成（cutlineFromMask の
+ * neckFill）で再膨張しないようにする。
  */
-export function buildCutline(
+export function buildCutlineMask(
   mask: Uint8Array,
   width: number,
   height: number,
   marginPx: number,
+): DilatedMask {
+  return dilateMask(mask, width, height, marginPx);
+}
+
+/**
+ * マスクグリッドへ閉多角形（画像座標）を塗り足した新しいグリッドを返す。
+ *
+ * 差込部の首部をカットラインへ「隙間埋めより前に」合流させるための操作。首部は
+ * 台座上面まで下へ伸びて元のグリッド外へ出得るため、必要なら多角形を覆うまでグリッドを
+ * 広げる（ただし退化パラメータでスケールが極端に小さいときに際限なく広がらないよう、
+ * 拡張量は元グリッドの長辺までに抑え、はみ出した部分は塗りをクリップする。クリップされた
+ * 首部の下端は後段 unionSlotRects の crisp な矩形合成で復元されるため形状は壊れない）。
+ *
+ * 入力グリッド（呼び出し側がメモ化して使い回す膨張マスク）を破壊しないよう、常に新しい
+ * バッファへコピーしてから塗る。塗りは走査線＋偶奇規則で、弧が上下に波打つ多角形でも
+ * 正しく内部だけを充填する。
+ */
+function paintPolygon(base: DilatedMask, polygon: readonly Point[]): DilatedMask {
+  let polyMinX = Number.POSITIVE_INFINITY;
+  let polyMinY = Number.POSITIVE_INFINITY;
+  let polyMaxX = Number.NEGATIVE_INFINITY;
+  let polyMaxY = Number.NEGATIVE_INFINITY;
+  for (const p of polygon) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+      return base;
+    }
+    if (p.x < polyMinX) polyMinX = p.x;
+    if (p.y < polyMinY) polyMinY = p.y;
+    if (p.x > polyMaxX) polyMaxX = p.x;
+    if (p.y > polyMaxY) polyMaxY = p.y;
+  }
+
+  const baseMinX = base.offsetX;
+  const baseMinY = base.offsetY;
+  const baseMaxX = base.offsetX + base.width - 1;
+  const baseMaxY = base.offsetY + base.height - 1;
+  const maxGrow = Math.max(base.width, base.height);
+
+  // 多角形を覆うまで（ただし maxGrow まで）グリッドを広げる。
+  const minX = Math.max(baseMinX - maxGrow, Math.min(baseMinX, Math.floor(polyMinX) - 1));
+  const minY = Math.max(baseMinY - maxGrow, Math.min(baseMinY, Math.floor(polyMinY) - 1));
+  const maxX = Math.min(baseMaxX + maxGrow, Math.max(baseMaxX, Math.ceil(polyMaxX) + 1));
+  const maxY = Math.min(baseMaxY + maxGrow, Math.max(baseMaxY, Math.ceil(polyMaxY) + 1));
+
+  const width = maxX - minX + 1;
+  const height = maxY - minY + 1;
+  const mask = new Uint8Array(width * height);
+  const shiftX = baseMinX - minX;
+  const shiftY = baseMinY - minY;
+  for (let y = 0; y < base.height; y++) {
+    const src = y * base.width;
+    mask.set(base.mask.subarray(src, src + base.width), (y + shiftY) * width + shiftX);
+  }
+
+  // 走査線は多角形の Y 範囲だけを見る（グリッド全体を舐めない）。
+  const firstRow = Math.max(0, Math.ceil(polyMinY) - minY);
+  const lastRow = Math.min(height - 1, Math.floor(polyMaxY) - minY);
+  const n = polygon.length;
+  const crossings: number[] = [];
+  for (let row = firstRow; row <= lastRow; row++) {
+    const y = row + minY;
+    crossings.length = 0;
+    for (let i = 0; i < n; i++) {
+      const a = polygon[i];
+      const b = polygon[(i + 1) % n];
+      if (!a || !b) continue;
+      // 半開区間で straddle 判定し、頂点を共有する 2 辺で交点を二重計上しない。
+      const straddles = (a.y <= y && b.y > y) || (b.y <= y && a.y > y);
+      if (!straddles) continue;
+      crossings.push(a.x + ((y - a.y) / (b.y - a.y)) * (b.x - a.x));
+    }
+    if (crossings.length < 2) continue;
+    crossings.sort((p, q) => p - q);
+    const rowOffset = row * width;
+    for (let k = 0; k + 1 < crossings.length; k += 2) {
+      const from = crossings[k];
+      const to = crossings[k + 1];
+      if (from === undefined || to === undefined) continue;
+      const startX = Math.max(0, Math.ceil(from) - minX);
+      const endX = Math.min(width - 1, Math.floor(to) - minX);
+      for (let x = startX; x <= endX; x++) {
+        mask[rowOffset + x] = 1;
+      }
+    }
+  }
+
+  return { mask, width, height, offsetX: minX, offsetY: minY };
+}
+
+/**
+ * 膨張マスクから最終カットラインを起こす（SPEC「カットライン」手順 4〜5）。
+ *
+ * 手順は：(1) 差込部の首部領域（neckFill、任意）をマスクへ塗り足す、(2) 閾値 gapFillPx
+ * より狭い隙間を半径 gapFillPx/2 の円板クロージングで充填、(3) マスクの外周を抽出して
+ * 間引き、なお分離したパーツは最小幅 minBridgeWidthPx のブリッジで連結（残れば凸包で
+ * 包絡）、(4) 平滑化、(5) 間引き。曲線補完は折れ線を保ったまま描画層（overlay/SVG）が
+ * 頂点列から曲線パスを起こす。以降の重心・台座計算・オーバーレイ・SVG はこの単一
+ * カットライン（が囲む領域）を外形として共有する。
+ *
+ * neckFill を渡すのは 2 回目の生成（差込部の配置が決まった後）。隙間埋めは「最終的な
+ * カットライン間の隙間」を対象とするため、首部を合流させた**後**のマスクに対して測る
+ * 必要がある（首部の側面とフィギュア外形の間にできる狭い隙間も充填対象になる。
+ * SPEC「隙間埋めと差込部の整合」）。首部を含まない 1 回目の結果は、重心・台座上面・
+ * 差込部の配置を決める基準として使う。
+ *
+ * 膨張は画像枠の外へはみ出すため、返す頂点は負座標や画像寸法超の座標を含み得る
+ * （グリッドの原点ずれは元画像座標へ戻してから返す）。有効パーツ（3 頂点以上）が皆無の
+ * 退化入力では空配列を返す（呼び出し側でエラーへ写す）。
+ */
+export function cutlineFromMask(
+  dilated: DilatedMask,
   gapFillPx: number,
   smoothing: number,
   minBridgeWidthPx: number,
+  neckFill?: readonly Point[],
 ): Contour {
-  // 余白ぶんの円板膨張。輪郭は構造的に自己交差しないため、以前のような union による
-  // 自己交差正規化は不要になる。
-  const dilated = dilateMask(mask, width, height, marginPx);
+  // 差込部（首部）をカットラインの一部としてマスクへ合流させてから隙間埋めへ渡す。
+  const merged = neckFill && neckFill.length >= 3 ? paintPolygon(dilated, neckFill) : dilated;
 
-  // 隙間埋め：閾値は「最終的なカットライン間の隙間」なので、余白を反映した後のマスクに
-  // 対して測る（SPEC「パイプライン上の位置・整合」）。半径 r = 閾値/2 の円板クロージング
-  // は幅 2r 未満の隙間だけを、円弧でなめらかに埋める。閾値 0（無効）なら素通し。
-  const closed = closeMask(dilated.mask, dilated.width, dilated.height, gapFillPx / 2);
+  // 隙間埋め：半径 r = 閾値/2 の円板クロージングは幅 2r 未満の隙間だけを、円弧で
+  // なめらかに埋める。閾値 0（無効）なら素通し。
+  const closed = closeMask(merged.mask, merged.width, merged.height, gapFillPx / 2);
 
-  // 2 段のグリッド拡張（膨張＋クロージング）を合成した、元画像座標への原点ずれ。
-  const offsetX = dilated.offsetX + closed.offsetX;
-  const offsetY = dilated.offsetY + closed.offsetY;
+  // 2 段のグリッド拡張（膨張・塗り足し＋クロージング）を合成した、元画像座標への原点ずれ。
+  const offsetX = merged.offsetX + closed.offsetX;
+  const offsetY = merged.offsetY + closed.offsetY;
 
   // 充填後マスクの外周を抽出 → 画素段差を間引き → グリッドの原点ずれを元画像座標へ戻す。
   // クロージングで結合したパーツはここで 1 リングとして現れ、以降のブリッジ連結・凸包
@@ -727,89 +837,222 @@ function averageY(contour: readonly Point[], from: number, to: number): number {
 }
 
 /**
+ * 差込部が置き換える「下辺の弧」の抽出結果。
+ * 首部の左右端の垂直線とカットライン下辺の交点 PL・PR で、閉ポリゴンは 2 本の弧に分かれる。
+ * そのうち下辺（弧内頂点の平均 Y が大きい側）が差込部で置き換わり、他方が残る。
+ */
+interface SlotArc {
+  /** 首部左端の下辺交点。 */
+  pl: Point;
+  /** 首部右端の下辺交点。 */
+  pr: Point;
+  /** 下辺の弧が頂点インデックスの増加方向（PL→PR）に並んでいるか。 */
+  forward: boolean;
+  /** 下辺の弧の内部頂点を PL→PR の向きに並べたもの（両交点が同一辺上なら空）。 */
+  lowerInterior: Point[];
+  /** 置換後に残す弧の頂点列（差込部の外周に続けて並べる順序）。 */
+  kept: Point[];
+}
+
+/**
+ * 首部の左右端で下辺を切り、置き換える弧と残す弧に分ける。
+ *
+ * attachSlotBody（多角形の一体化）と neckFillPolygon（マスクへの塗り足し）が同じ弧を
+ * 見ることで、「首部が板へ足す領域」の解釈が 2 経路でずれないようにする。
+ * 交点が取れない（差込部が板の外にある）場合は null。ただし analysis/slot.findSlot が
+ * 同じ交点を検査して配置不可としているため、正常系では到達しない防御的分岐である。
+ */
+function extractSlotArc(contour: Contour, slot: SlotResult): SlotArc | null {
+  const n = contour.length;
+  const neckLeftX = slot.neck.xPixel;
+  const neckRightX = slot.neck.xPixel + slot.neck.widthPixel;
+  if (n < 3 || !(neckLeftX < neckRightX) || !Number.isFinite(slot.baseTopYPixel)) {
+    return null;
+  }
+
+  const cl = lowerCrossing(contour, neckLeftX);
+  const cr = lowerCrossing(contour, neckRightX);
+  if (!cl || !cr) {
+    return null;
+  }
+
+  const pl: Point = { x: neckLeftX, y: cl.y };
+  const pr: Point = { x: neckRightX, y: cr.y };
+  const iL = cl.edge;
+  const iR = cr.edge;
+
+  // 同一辺が両端の垂直線をまたぐ（下辺が 1 本の長い辺）場合、下辺の弧に内部頂点は無く、
+  // 残る弧は全周になる。差込部を差し込む向きはその辺の向き（左→右／右→左）で決まる。
+  if (iL === iR) {
+    const a = contour[iL];
+    const b = contour[(iL + 1) % n];
+    if (!a || !b) return null;
+    return {
+      pl,
+      pr,
+      forward: a.x <= b.x,
+      lowerInterior: [],
+      kept: collectForward(contour, (iL + 1) % n, iL),
+    };
+  }
+
+  // 2 本の弧のうち平均 Y が大きい側が下辺。
+  const forward = averageY(contour, (iL + 1) % n, iR) >= averageY(contour, (iR + 1) % n, iL);
+  if (forward) {
+    return {
+      pl,
+      pr,
+      forward,
+      lowerInterior: collectForward(contour, (iL + 1) % n, iR),
+      kept: collectForward(contour, (iR + 1) % n, iL),
+    };
+  }
+  return {
+    pl,
+    pr,
+    forward,
+    // 下辺は PR→PL 向きに並んでいる。塗り足し用に PL→PR の向きへそろえる。
+    lowerInterior: collectForward(contour, (iR + 1) % n, iL).reverse(),
+    kept: collectForward(contour, (iL + 1) % n, iR),
+  };
+}
+
+/**
  * 差込部（首部＋ツメ）をカットラインへ一体化する。
  *
  * 首部の X 区間の下辺を、首部・肩・ツメを描く外周へ置き換えた新しいカットラインを返す。
  * アクリル板本体・首部・ツメが常に 1 枚として切り出されるようにするための拡張であり、
  * 拡張後の形状がオーバーレイ・SVG エクスポートの外形になる（SPEC「カットラインとの一体化」）。
- *
- * 手順：首部の左右端の垂直線とカットライン下辺の交点 PL・PR を求め、その 2 点の間にある
- * 「下辺の弧」（弧内頂点の平均 Y が大きい側）を、以下の外周で置き換える。
+ * 置き換える外周は：
  *
  *   PL →(首部左側面)→ 台座上面 →(左の肩)→ ツメ左 →(ツメ底)→ ツメ右 →(右の肩)→ 台座上面 →(首部右側面)→ PR
  *
  * 台座上面より下へ出るのはツメだけで、板本体は台座に潜り込まない。区間内は元々アクリル
  * 本体の下端なので、下辺だけを下げるこの置換は自己交差を生まない。
  *
- * 首部端の下辺交点が取れない（差込部が板の外にある）場合は拡張できないためそのまま返す
- * ——ただし analysis/slot.findSlot が同じ交点を検査して配置不可としているため、正常系では
- * 到達しない防御的分岐である。
+ * 隙間埋めが無効（閾値 0）のときの一体化経路。有効なときは首部をマスクへ塗り足して
+ * カットラインを起こし直す（cutlineFromMask + unionSlotRects）ため、こちらは使わない。
+ * 弧が取れない異常時はそのまま返す。
  */
 export function attachSlotBody(contour: Contour, slot: SlotResult): Contour {
-  const n = contour.length;
-  const neckLeftX = slot.neck.xPixel;
-  const neckRightX = slot.neck.xPixel + slot.neck.widthPixel;
   const tabLeftX = slot.tab.xPixel;
   const tabRightX = slot.tab.xPixel + slot.tab.widthPixel;
   const baseTopY = slot.baseTopYPixel;
   const tabBottomY = slot.tab.yPixel + slot.tab.heightPixel;
 
-  if (
-    n < 3 ||
-    !(neckLeftX < neckRightX) ||
-    !(tabLeftX < tabRightX) ||
-    !Number.isFinite(baseTopY) ||
-    !Number.isFinite(tabBottomY)
-  ) {
+  const arc =
+    !(tabLeftX < tabRightX) || !Number.isFinite(tabBottomY) ? null : extractSlotArc(contour, slot);
+  if (!arc) {
     return contour.slice();
   }
 
-  const cl = lowerCrossing(contour, neckLeftX);
-  const cr = lowerCrossing(contour, neckRightX);
-  if (!cl || !cr) {
-    return contour.slice();
-  }
-
-  const iL = cl.edge;
-  const iR = cr.edge;
-
-  // 差込部の外周を左→右向きに並べたもの。逆向きに差し込む場合は反転して使う。
+  // 差込部の外周を左→右向きに並べたもの。下辺の弧が逆向きなら反転して使う。
   const bodyLeftToRight: Point[] = [
-    { x: neckLeftX, y: cl.y },
-    { x: neckLeftX, y: baseTopY },
+    arc.pl,
+    { x: arc.pl.x, y: baseTopY },
     { x: tabLeftX, y: baseTopY },
     { x: tabLeftX, y: tabBottomY },
     { x: tabRightX, y: tabBottomY },
     { x: tabRightX, y: baseTopY },
-    { x: neckRightX, y: baseTopY },
-    { x: neckRightX, y: cr.y },
+    { x: arc.pr.x, y: baseTopY },
+    arc.pr,
   ];
-  const bodyRightToLeft: Point[] = [...bodyLeftToRight].reverse();
+  const body = arc.forward ? bodyLeftToRight : [...bodyLeftToRight].reverse();
+  return [...body, ...arc.kept];
+}
 
-  // 同一辺が両端の垂直線をまたぐ（下辺が 1 本の長い辺）場合は、その辺の途中に
-  // 差込部を差し込む。辺の向き（左→右／右→左）に沿って外周の順序を決める。
-  if (iL === iR) {
-    const a = contour[iL];
-    const b = contour[(iL + 1) % n];
-    if (!a || !b) return contour.slice();
-    const insert = a.x <= b.x ? bodyLeftToRight : bodyRightToLeft;
-    const out: Point[] = [];
-    for (let i = 0; i < n; i++) {
-      const p = contour[i];
-      if (p) out.push(p);
-      if (i === iL) out.push(...insert);
+/**
+ * 差込部の首部がカットラインへ足す領域（閉多角形、画像座標）を返す。
+ *
+ * 下辺の弧と台座上面で囲まれた領域＝attachSlotBody が首部として板へ足すのと同じ範囲。
+ * これをマスクへ塗り足してから隙間埋め（クロージング）を掛けることで、首部の側面と
+ * フィギュア外形の間にできる狭い隙間（脚の内側と首部の間など）も充填対象になる
+ * （SPEC「隙間埋めと差込部の整合」）。ツメは含めない：ツメ幅は台座スリットへ挿さる
+ * 実寸なので、クロージングの円弧でツメ根元が太らないよう後段で crisp に合成する。
+ */
+export function neckFillPolygon(contour: Contour, slot: SlotResult): Point[] | null {
+  const arc = extractSlotArc(contour, slot);
+  if (!arc) {
+    return null;
+  }
+  const baseTopY = slot.baseTopYPixel;
+  return [
+    arc.pl,
+    ...arc.lowerInterior,
+    arc.pr,
+    { x: arc.pr.x, y: baseTopY },
+    { x: arc.pl.x, y: baseTopY },
+  ];
+}
+
+/** ツメ矩形を union する際に首部側へ食い込ませる重なり(px)。接続を数値誤差から守る。 */
+const SLOT_UNION_OVERLAP_PX = 1;
+
+/** SlotRect（左上原点・幅・高さ）を閉ポリゴンの頂点列へ。 */
+function slotRectPoints(rect: SlotRect, extendTopPx = 0): Point[] {
+  const left = rect.xPixel;
+  const right = rect.xPixel + rect.widthPixel;
+  const top = rect.yPixel - extendTopPx;
+  const bottom = rect.yPixel + rect.heightPixel;
+  return [
+    { x: left, y: top },
+    { x: right, y: top },
+    { x: right, y: bottom },
+    { x: left, y: bottom },
+  ];
+}
+
+/** リング群から面積最大のものを選ぶ（union が複数ポリゴンへ割れた異常時の保険）。 */
+function largestRing(rings: readonly Point[][]): Point[] | null {
+  let best: Point[] | null = null;
+  let bestArea = 0;
+  for (const ring of rings) {
+    if (ring.length < 3) continue;
+    let area2 = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i];
+      const b = ring[(i + 1) % ring.length];
+      if (!a || !b) continue;
+      area2 += a.x * b.y - b.x * a.y;
     }
-    return out;
+    const area = Math.abs(area2) / 2;
+    if (area > bestArea) {
+      bestArea = area;
+      best = ring;
+    }
   }
+  return best;
+}
 
-  // 2 本の弧のうち、下辺（平均 Y が大きい側）を差込部の外周で置き換える。
-  const forwardInteriorAvg = averageY(contour, (iL + 1) % n, iR);
-  const otherInteriorAvg = averageY(contour, (iR + 1) % n, iL);
-
-  if (forwardInteriorAvg >= otherInteriorAvg) {
-    // 前方向の弧（PL→…→PR）が下辺。差込部＋反対側（上辺）の弧で再構成する。
-    return [...bodyLeftToRight, ...collectForward(contour, (iR + 1) % n, iL)];
+/**
+ * 首部を合流させた（＝隙間埋め済みの）カットラインへ、首部・ツメの矩形を crisp に合成する。
+ *
+ * マスク経由のカットラインは画素段差の間引きと平滑化（Chaikin）を受けるため、首部の側壁や
+ * ツメの角が丸まって実寸から痩せる。ツメ幅＝差込口幅・首部下端＝台座上面はスリット加工に
+ * 直結する寸法なので、平滑化後に本来の矩形を union して正確な形へ戻す（union は材料を足す
+ * だけなので、隙間埋めで充填された部分は失われない）。ツメは首部側へわずかに食い込ませ、
+ * 台座上面での接続が数値誤差で切れないようにする。
+ *
+ * union が破綻した（例外・リング無し）場合は null を返し、呼び出し側で従来経路
+ * （attachSlotBody）へフォールバックさせる。
+ */
+export function unionSlotRects(contour: Contour, slot: SlotResult): Contour | null {
+  if (contour.length < 3) {
+    return null;
   }
-  // 反対側の弧（PR→…→PL）が下辺。
-  return [...bodyRightToLeft, ...collectForward(contour, (iL + 1) % n, iR)];
+  // 面積 0 の矩形（持ち上げ量 0 で首部が潰れる等）は union へ渡さない。ツメは首部側へ
+  // 食い込ませてあるため、首部が潰れていてもカットラインと確実に重なる。
+  const parts: Point[][] = [contour.slice()];
+  if (slot.neck.widthPixel > 0 && slot.neck.heightPixel > 0) {
+    parts.push(slotRectPoints(slot.neck));
+  }
+  if (slot.tab.widthPixel > 0 && slot.tab.heightPixel > 0) {
+    parts.push(slotRectPoints(slot.tab, SLOT_UNION_OVERLAP_PX));
+  }
+  try {
+    const merged = largestRing(unionOuterRings(parts));
+    return merged && merged.length >= 3 ? merged : null;
+  } catch {
+    return null;
+  }
 }
