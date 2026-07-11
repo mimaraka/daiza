@@ -16,7 +16,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { Eye, ImageOff, Loader2, Maximize2, Minus, PersonStanding, Plus, Scan } from 'lucide-react';
+import { Eye, ImageOff, Loader2, Maximize2, Minus, PersonStanding, Plus } from 'lucide-react';
 
 import { RULER_SIZE_PX, Ruler } from '@/components/Ruler';
 import { Button } from '@/components/ui/button';
@@ -411,15 +411,6 @@ export function Preview({ image, result, mmPerPixel, status, onImageFile }: Prev
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={actualSize}
-              title="100%表示"
-              aria-label="100%表示"
-            >
-              <Scan />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
               onClick={fit}
               title="全体表示（Fit）"
               aria-label="全体表示"
@@ -437,10 +428,10 @@ export function Preview({ image, result, mmPerPixel, status, onImageFile }: Prev
               <div
                 role="status"
                 aria-live="polite"
-                // 上端ルーラーの帯（RULER_SIZE_PX）より下へ置き、目盛り・数値ラベルを
-                // 隠さないようにする（SPEC「解析中インジケータの配置」）。
+                // ビューワー中央上部（上端ルーラーの帯 RULER_SIZE_PX より下）へ置く。
+                // 中央なら視線の通り道にあって気づきやすく、かつ目盛り・数値ラベルも隠さない。
                 style={{ top: RULER_SIZE_PX + 8 }}
-                className="bg-background/80 text-muted-foreground pointer-events-none absolute right-2 flex items-center gap-1.5 rounded-md border px-2 py-1 shadow-sm backdrop-blur"
+                className="bg-background/80 text-muted-foreground pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-md border px-2 py-1 shadow-sm backdrop-blur"
               >
                 <Loader2 className="size-3.5 animate-spin" />
                 <span className="text-xs font-medium">更新中…</span>

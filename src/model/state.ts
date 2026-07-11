@@ -30,8 +30,8 @@ export const DEFAULT_PARAMETERS: AnalysisParameters = {
   // 余白は SPEC 既定の 3mm。平滑化は「最小（無効）」から始め、UI で強められるようにする。
   cutLineMarginMm: 3,
   cutLineSmoothing: 0,
-  // 隙間埋めは形状を変える操作なので、既定では無効（0）にしてユーザーの明示指定に委ねる。
-  gapFillThresholdMm: 0,
+  // 印刷・加工で潰れやすい細い隙間は既定で埋める。0 にすれば無効化できる。
+  gapFillThresholdMm: 3,
   // 分離パーツ連結部の最小幅。板厚（既定 3mm）と同程度を既定とし、細すぎる連結を防ぐ。
   minBridgeWidthMm: 3,
   slotWidthMm: 20,

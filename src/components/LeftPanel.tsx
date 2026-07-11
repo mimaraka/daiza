@@ -1,4 +1,5 @@
-// 左パネル：画像読み込み・各種パラメータ入力・エクスポート操作を配置する。
+// 左パネル：画像読み込みと各種パラメータ入力を配置する。
+// エクスポート操作は解析結果があって初めて意味を持つため、右列（ExportPanel）に置く。
 //
 // このコンポーネントは「表示と入力の受け口」に徹する純粋な presentational
 // コンポーネントであり、状態は保持しない。値と変更ハンドラはすべて props で
@@ -6,7 +7,7 @@
 
 import { useRef, useState } from 'react';
 
-import { Download, ImagePlus } from 'lucide-react';
+import { ImagePlus } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -30,8 +31,6 @@ export interface LeftPanelProps {
   onParametersChange: (parameters: Partial<AnalysisParameters>) => void;
   /** ユーザーが選択した PNG ファイルを通知する。未指定なら読み込みボタンは無効。 */
   onImageFile?: (file: File) => void;
-  /** SVG エクスポートを要求する。結果が無い／未実装時は未指定で無効化される。 */
-  onExportSvg?: () => void;
 }
 
 /**
@@ -173,12 +172,7 @@ function PresetNumberField({
   );
 }
 
-export function LeftPanel({
-  parameters,
-  onParametersChange,
-  onImageFile,
-  onExportSvg,
-}: LeftPanelProps) {
+export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftPanelProps) {
   const smoothing = PARAMETER_CONSTRAINTS.cutLineSmoothing;
   // 首部幅の下限は差込口幅に連動する（肩が消えないための不変条件）。入力側でも下限を
   // 差込口幅へ追従させ、そもそも制約を割る値を入れられないようにする（状態側の
@@ -339,19 +333,6 @@ export function LeftPanel({
             constraint={PARAMETER_CONSTRAINTS.baseWidthMm}
             onValueChange={(baseWidthMm) => onParametersChange({ baseWidthMm })}
           />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>エクスポート</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {/* SVG 生成（実寸座標系）は onExportSvg に委ねる。解析結果が無ければ無効。 */}
-          <Button type="button" className="w-full" disabled={!onExportSvg} onClick={onExportSvg}>
-            <Download />
-            SVGをエクスポート
-          </Button>
         </CardContent>
       </Card>
     </div>

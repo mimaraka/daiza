@@ -2,11 +2,13 @@
 // 各パネルを配線する。PNG 読み込み（TODO 4）・解析パイプライン（TODO 13）・
 // SVG エクスポート（TODO 15）を配線済み。
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState, type CSSProperties } from 'react';
 
 import { loadPngFile } from '@/analysis/imageLoader';
 import { computeMmPerPixel } from '@/analysis/scale';
+import { ExportPanel } from '@/components/ExportPanel';
 import { LeftPanel } from '@/components/LeftPanel';
+import { PaneResizer } from '@/components/PaneResizer';
 import { Preview } from '@/components/Preview';
 import { ResultPanel } from '@/components/ResultPanel';
 import { generateSvg } from '@/export/svg';
@@ -35,8 +37,20 @@ function svgFileName(imageFileName: string): string {
   return `${base || 'daiza'}.svg`;
 }
 
+/**
+ * 左右パネルの幅(px)の初期値と可動範囲。上限は「プレビューが主役の列であり続ける」ための
+ * 歯止め、下限は入力欄・数値がまともに読める最小幅として決めた実用値。
+ */
+const LEFT_PANE = { initial: 384, min: 280, max: 560 } as const;
+const RIGHT_PANE = { initial: 320, min: 240, max: 480 } as const;
+
 function App() {
   const { state, actions } = useAppState();
+
+  // ペイン幅（広幅レイアウト時のみ有効）。CSS 変数として main へ渡し、Tailwind の
+  // lg: 修飾子と組み合わせることで、縦積みになる狭幅では幅指定自体を効かせない。
+  const [leftWidth, setLeftWidth] = useState<number>(LEFT_PANE.initial);
+  const [rightWidth, setRightWidth] = useState<number>(RIGHT_PANE.initial);
 
   // 画像・パラメータの変化を監視し「解析 → 状態更新 → 再描画」を即時駆動する。
   // 結果は state.result / state.error に載り、Preview・ResultPanel が自動で反映する。
@@ -98,19 +112,35 @@ function App() {
 
       {/* 画面が広ければ3ペイン（左パネル／プレビュー／結果パネル）、狭ければ上下配置へ
           切り替える（レスポンシブ）。結果をプレビューの下ではなく右列へ置くのは、16:9 等の
-          横長ウィンドウでプレビューの縦幅が圧迫されるのを避けるため（SPEC「解析結果パネルの配置」）。 */}
-      <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4 lg:flex-row lg:overflow-hidden">
-        {/* 左パネル：狭幅では先頭に積み、広幅では固定幅の縦スクロール列にする。 */}
-        <aside className="shrink-0 lg:w-96 lg:overflow-y-auto">
+          横長ウィンドウでプレビューの縦幅が圧迫されるのを避けるため（SPEC「解析結果パネルの配置」）。
+          左右パネルの幅は CSS 変数で渡し、間の PaneResizer から可変にする。狭幅（縦積み）では
+          lg: 修飾子が外れるため幅指定は効かず、ハンドルも表示されない。 */}
+      <main
+        className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4 lg:flex-row lg:overflow-hidden"
+        style={
+          {
+            '--left-pane-width': `${leftWidth}px`,
+            '--right-pane-width': `${rightWidth}px`,
+          } as CSSProperties
+        }
+      >
+        {/* 左パネル：狭幅では先頭に積み、広幅では可変幅の縦スクロール列にする。 */}
+        <aside className="shrink-0 lg:w-[var(--left-pane-width)] lg:overflow-y-auto">
           <LeftPanel
             parameters={state.parameters}
             onParametersChange={actions.updateParameters}
             onImageFile={handleImageFile}
-            // 結果がある時だけ onExportSvg を渡し、無ければ prop 自体を省いてボタンを無効化する
-            // （exactOptionalPropertyTypes 下では undefined の明示代入を避け、条件スプレッドで出し分ける）。
-            {...(result ? { onExportSvg: handleExportSvg } : {})}
           />
         </aside>
+
+        <PaneResizer
+          width={leftWidth}
+          min={LEFT_PANE.min}
+          max={LEFT_PANE.max}
+          sign={1}
+          onWidthChange={setLeftWidth}
+          label="左パネルの幅"
+        />
 
         {/* 中央：プレビュー。残りの幅・高さを使い切る主役の列。エラー表示はプレビューの
             操作（読み込み・パラメータ変更）に対する応答なので、この列の上部に置く。
@@ -133,9 +163,23 @@ function App() {
           />
         </section>
 
-        {/* 右パネル：解析結果。左パネルと同じく固定幅・列内スクロール。 */}
-        <aside className="shrink-0 lg:w-80 lg:overflow-y-auto">
+        {/* ハンドルの右にあるペインを操作するため、ポインタの右移動は幅の減少になる（sign=-1）。 */}
+        <PaneResizer
+          width={rightWidth}
+          min={RIGHT_PANE.min}
+          max={RIGHT_PANE.max}
+          sign={-1}
+          onWidthChange={setRightWidth}
+          label="解析結果パネルの幅"
+        />
+
+        {/* 右パネル：解析結果と、それを書き出すエクスポート操作。左パネルと同じく
+            可変幅・列内スクロール。 */}
+        <aside className="flex shrink-0 flex-col gap-4 lg:w-[var(--right-pane-width)] lg:overflow-y-auto">
           <ResultPanel result={state.result} />
+          {/* 結果がある時だけ onExportSvg を渡し、無ければ prop 自体を省いてボタンを無効化する
+              （exactOptionalPropertyTypes 下では undefined の明示代入を避け、条件スプレッドで出し分ける）。 */}
+          <ExportPanel {...(result ? { onExportSvg: handleExportSvg } : {})} />
         </aside>
       </main>
     </div>
