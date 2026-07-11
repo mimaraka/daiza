@@ -23,7 +23,7 @@ export interface AppState {
   error: AnalysisError | null;
 }
 
-/** パラメータの既定値。SPEC の例（高さ160 / 安全率1.3 等）に準拠。 */
+/** パラメータの既定値。SPEC の例（高さ160 / 板厚3 等）に準拠。 */
 export const DEFAULT_PARAMETERS: AnalysisParameters = {
   figureHeightMm: 160,
   thicknessMm: 3,
@@ -41,7 +41,6 @@ export const DEFAULT_PARAMETERS: AnalysisParameters = {
   neckWidthMm: 40,
   // 既定では板の下端が台座上面にちょうど接する（持ち上げなし）。
   plateLiftMm: 0,
-  safetyFactor: 1.3,
   // 台座幅は指定値がそのまま実寸になる（余白ではない）。一般的なアクリルスタンドの台座幅。
   baseWidthMm: 50,
 };
@@ -94,7 +93,6 @@ export const PARAMETER_CONSTRAINTS = {
   // 首部幅の実効下限は差込口幅に連動する（minNeckWidthMm）。ここでの min は絶対的な床。
   neckWidthMm: { min: 1, max: 100, step: 0.5 },
   plateLiftMm: { min: 0, max: 50, step: 0.5 },
-  safetyFactor: { min: 1.0, max: 2.0, step: 0.1 },
   // 指定値がそのまま台座の実寸幅になるため、下限は「スリットが切れる」程度の正値に取る。
   baseWidthMm: { min: 1, max: 300, step: 1 },
 } as const satisfies Record<keyof AnalysisParameters, { min: number; max: number; step: number }>;

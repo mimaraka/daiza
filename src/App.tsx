@@ -135,7 +135,7 @@ function App() {
 
         {/* 右パネル：解析結果。左パネルと同じく固定幅・列内スクロール。 */}
         <aside className="shrink-0 lg:w-80 lg:overflow-y-auto">
-          <ResultPanel result={state.result} safetyFactor={state.parameters.safetyFactor} />
+          <ResultPanel result={state.result} />
         </aside>
       </main>
     </div>

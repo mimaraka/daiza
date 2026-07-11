@@ -179,7 +179,6 @@ export function LeftPanel({
   onImageFile,
   onExportSvg,
 }: LeftPanelProps) {
-  const safety = PARAMETER_CONSTRAINTS.safetyFactor;
   const smoothing = PARAMETER_CONSTRAINTS.cutLineSmoothing;
   // 首部幅の下限は差込口幅に連動する（肩が消えないための不変条件）。入力側でも下限を
   // 差込口幅へ追従させ、そもそも制約を割る値を入れられないようにする（状態側の
@@ -331,28 +330,6 @@ export function LeftPanel({
             constraint={PARAMETER_CONSTRAINTS.plateLiftMm}
             onValueChange={(plateLiftMm) => onParametersChange({ plateLiftMm })}
           />
-
-          <div className="grid gap-1.5">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="safety-factor">安全率</Label>
-              {/* スライダーは連続値のため現在値を数値で併記して把握しやすくする。 */}
-              <span className="text-muted-foreground text-sm tabular-nums">
-                {parameters.safetyFactor.toFixed(1)}
-              </span>
-            </div>
-            <Slider
-              id="safety-factor"
-              min={safety.min}
-              max={safety.max}
-              step={safety.step}
-              value={[parameters.safetyFactor]}
-              onValueChange={([safetyFactor]) => {
-                if (safetyFactor !== undefined) {
-                  onParametersChange({ safetyFactor });
-                }
-              }}
-            />
-          </div>
 
           <NumberField
             id="base-width"

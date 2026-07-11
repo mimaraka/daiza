@@ -10,8 +10,6 @@ import type { AnalysisResult } from '@/model/types';
 export interface ResultPanelProps {
   /** 直近の解析結果。未解析・失敗時は null。 */
   result: AnalysisResult | null;
-  /** 現在の安全率。結果には含まれないパラメータ値のため別途受け取る。 */
-  safetyFactor: number;
 }
 
 /** 未確定値のプレースホルダ。全項目で共通化して表記を揃える。 */
@@ -27,7 +25,7 @@ interface ResultRow {
  * 結果オブジェクトを表示用の行データへ変換する。
  * 表示整形（桁数・単位）はここに集約し、JSX 側は並べるだけにする。
  */
-function buildRows(result: AnalysisResult | null, safetyFactor: number): ResultRow[] {
+function buildRows(result: AnalysisResult | null): ResultRow[] {
   // 数値の丸めと単位付与を一箇所に集約する。null の場合は必ず PLACEHOLDER。
   const num = (value: number | undefined, unit: string, digits = 1): string =>
     value === undefined ? PLACEHOLDER : `${value.toFixed(digits)} ${unit}`;
@@ -61,12 +59,11 @@ function buildRows(result: AnalysisResult | null, safetyFactor: number): ResultR
       label: '転倒角（右）',
       value: num(result?.stability.tippingAngleRightDeg, '°'),
     },
-    { label: '安全率', value: safetyFactor.toFixed(1) },
   ];
 }
 
-export function ResultPanel({ result, safetyFactor }: ResultPanelProps) {
-  const rows = buildRows(result, safetyFactor);
+export function ResultPanel({ result }: ResultPanelProps) {
+  const rows = buildRows(result);
 
   return (
     <Card>
