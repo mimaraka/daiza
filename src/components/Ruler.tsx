@@ -13,8 +13,12 @@ import { useMemo } from 'react';
 import type { ViewportTransform } from '@/hooks/useViewport';
 import { buildRulerTicks, formatTickLabel } from '@/render/ruler';
 
-/** ルーラーの帯の太さ(px)。上端・左端・角の正方形で共有する。 */
-const RULER_SIZE_PX = 20;
+/**
+ * ルーラーの帯の太さ(px)。上端・左端・角の正方形で共有する。
+ * プレビューへ重ねる他の UI（解析中インジケータ等）がルーラーと重ならないよう
+ * オフセットの基準としても使うため公開する（SPEC「解析中インジケータの配置」）。
+ */
+export const RULER_SIZE_PX = 20;
 
 /** 主目盛り・副目盛りの線の長さ(px)。内側の縁から手前へ伸ばす。 */
 const MAJOR_TICK_LENGTH_PX = 8;
