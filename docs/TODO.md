@@ -41,7 +41,7 @@
 - [x] 板厚(mm) 入力（例: 2/3/5mm）＝標準値プリセット＋カスタム入力（Select）
 - [x] 差込口幅(mm) 入力（例: 5/6/7）＝標準値プリセット＋カスタム入力（Select）
 - [x] 安全率スライダー（1.0〜2.0、初期値1.3）
-- [x] 台座余白（左右余白 0〜30mm）
+- [x] 台座幅（実寸 1〜300mm、初期値50。指定値がそのまま台座幅／20-5 で余白から変更）
 
 ## 6. スケール計算
 
@@ -179,6 +179,61 @@
 - [x] **見切れ防止**：`useViewport` を内容範囲（画像∪カットライン∪オーバーレイの外接矩形）ベースへ変更し Fit/100% を拡張。自動フィットは画像 id（`fitKey`）で制御しパラメータ変更では再フィットしない。オーバーレイ SVG は `overflow-visible` で枠外も描画
 - [x] **複数パーツの包絡**：`contour.ts` に 8 連結の連結成分ラベリング＋成分ごとの外周追跡（`extractContours`）を実装。第 1 相を `Contour[]` 化し、`buildCutline` の union で近接パーツを結合、余白でも分離が残れば凸包で全パーツを包絡
 - [x] **曲線補完**：`utils/curve.ts` に閉 Catmull-Rom→3 次ベジェ変換（`closedCurvePathData`）を追加し、オーバーレイ・SVG エクスポートを曲線パス（`C` コマンド）で出力
+
+## 20. 3回目テストの修正対応（ルーラー・差込部の再構成）
+
+3回目テストで判明した不具合・仕様変更への対応（`docs/SPEC.md` 更新済み）。
+
+### 20-1. ビューワーのルーラー（新機能）
+
+- [x] `components/Preview.tsx` の上端に水平ルーラー・左端に垂直ルーラーを表示する（`components/Ruler.tsx`。目盛り計算は純粋ロジックの `render/ruler.ts` へ分離）
+- [x] 目盛りは実寸(mm)。ズーム・パン（`useViewport` の transform）に追従させる（`screen = tx + mm × scale / mmPerPixel` の1次式で算出。スケールは解析結果を待たず `App` が `computeMmPerPixel` で導いて渡す）
+- [x] ズーム率に応じて目盛り間隔を自動選択（1 / 5 / 10 / 50 / 100 mm）。主目盛りに数値ラベル、副目盛りは線のみ（主目盛りは間隔60px以上になる最小の候補。副目盛りは主の1/5、5px未満に潰れる場合は非表示）
+- [x] ルーラーが `pointer-events` を奪わず、ドラッグパン・ホイールズームを妨げないことを確認（ルーラー全体を `pointer-events-none` に固定。実機での操作確認は要ブラウザ）
+
+### 20-2. アクリル板と台座の上下関係（不具合修正・仕様変更）
+
+- [x] 台座上面 Y の基準を「画像下端」から**カットライン最下端**へ変更する（`analysis/base.ts` の `computeBaseTopYPixel`）
+- [x] `model/types.ts`・`model/state.ts` に「アクリル板の持ち上げ量(mm)」（`plateLiftMm`、既定 0、0〜50）を追加
+- [x] 台座上面 Y = カットライン最下端 Y + 持ち上げ量 として `analysis/base.ts` ／ `render/overlay.ts` ／ `export/svg.ts` の基準線を統一する（`SlotResult.baseTopYPixel`／`BaseResult.topYMm` を単一の基準として共有。オーバーレイの台座も上辺を台座上面に合わせた幅×奥行の footprint 描画へ変更し、ツメが貫通していないことを目視できるようにした）
+- [x] `LeftPanel` に「アクリル板の持ち上げ量(mm)」入力を追加
+- [x] 重心高さ（転倒角・推奨奥行）の基準を台座上面へ変更する（`analysis/base.ts`・`analysis/stability.ts`。`render/simulation.ts` の支点も台座上面へ）
+
+### 20-3. 重心マーカーの縮小（UI）
+
+- [x] `render/overlay.ts` の `centroidRadius` を約 50% に縮小する（画像短辺の 1%→0.5%、下限 3px→1.5px）
+
+### 20-4. 差込部を「首部＋ツメ」の2矩形へ再構成（仕様変更）
+
+- [x] `model/types.ts`・`model/state.ts` に「首部幅(mm)」（`neckWidthMm`、既定 10、差込口幅とは独立）を追加
+- [x] **制約「首部幅 > 差込口幅」を強制**する：下限を `差込口幅 + 2 × 最小ショルダー幅(片側0.5mm)` とし（`minNeckWidthMm`）、差込口幅の変更で下限を割る場合は首部幅を自動で押し上げる（`normalizeParameters` を reducer の `updateParameters` に噛ませ、UI 入力に依らず不変条件を保つ）
+- [x] `LeftPanel` に「首部幅(mm)」入力を追加（下限を差込口幅に連動させる）
+- [x] `analysis/slot.ts`：差込部を「首部（幅=首部幅、カットライン下辺〜台座上面）」と「ツメ（幅=差込口幅、深さ=板厚）」の2矩形として返す（`SlotResult` を拡張）。制約が破れた場合・首部が板から外れる場合は `slotPlacementFailed`
+- [x] ツメ深さを板厚(mm)に固定し、台座を貫通しないこと（ツメ深さ ≦ 台座奥行）を保証する（台座奥行の床をツメ深さ×3＝スリット壁ぶんに取ることで構成的に保証）
+- [x] `analysis/contour.ts` の `attachSlotTab` を「首部＋ツメ」形状のカットライン拡張へ変更する（`attachSlotBody`。首部側面→肩→ツメの外周で下辺の弧を置換）
+- [x] `render/overlay.ts`・`export/svg.ts` を首部・ツメの2矩形描画へ更新する
+
+### 20-5. 台座幅の直接指定・既定値見直し（仕様変更）
+
+- [x] パラメータ「台座余白（`baseMarginMm`）」を「台座幅（`baseWidthMm`）」へ置き換える（`model/types.ts`・`model/state.ts`・`components/LeftPanel.tsx`）。**指定値がそのまま台座の実寸幅**になり、2 倍・加算はしない。既定値 50mm、範囲 1〜300mm
+- [x] `analysis/base.ts`：安全率は幅を作る係数ではなく**指定幅の検査**に使う。必要幅 = `max(2 × |重心X − 差込口中心X| × 安全率, 差込口幅)` を下回る指定は自動で広げず `baseCalculationFailed`（`pipeline.ts` のメッセージも台座幅の見直しを促す文面へ）
+- [x] 結果表示の「推奨台座幅」を「台座幅」へ改称（`components/ResultPanel.tsx`）
+- [x] 既定値変更：差込口幅 5mm → **20mm**、首部幅 10mm → **40mm**（`model/state.ts` の `DEFAULT_PARAMETERS`）
+
+## 21. 狭い隙間の充填（隙間埋め・仕様追加）
+
+カットライン間の隙間が閾値より狭いとアクリルが破損しやすいため、狭い隙間をなめらかに充填する
+（`docs/SPEC.md`「隙間埋め閾値」「狭い隙間の充填（隙間埋め）」参照）。方式はモルフォロジカル
+クロージング（半径 = 閾値/2 の円板で膨張→収縮）。
+
+- [x] `model/types.ts`・`model/state.ts` に「隙間埋め閾値(mm)」（`gapFillThresholdMm`、既定 0=無効、0〜20mm）を追加
+- [x] `components/LeftPanel.tsx` に「隙間埋め閾値(mm)」入力を追加（カットライン平滑化の近くに配置）
+- [x] `analysis/distance.ts`：`erodeMask(mask, width, height, radiusPx)` を実装（背景からの EDT > r をしきい値化。`dilateMask` の双対）
+- [x] `analysis/distance.ts`：`closeMask(mask, width, height, radiusPx)` を実装（`dilateMask` のパディング付きグリッド上で `erodeMask` を掛け、原点ずれ（`offsetX/offsetY`）を返して呼び出し側で元座標へ復元。膨張・収縮でクランプ後の同一半径を共有。radiusPx ≦ 0 はスキップ）
+- [x] `analysis/contour.ts`：`buildCutline` に `gapFillPx` 引数を追加し、余白膨張（`dilateMask`）直後・輪郭抽出前に半径 `gapFillPx / 2` のクロージングを適用
+- [x] `analysis/pipeline.ts`：`cutlineKey` に隙間埋め閾値を含め、閾値変更時にカットラインメモ（`cutlineMemo`）が再生成されるようにする
+- [x] クロージングで結合したパーツがブリッジ連結／凸包退避の対象から外れる（結合後の外周が 1 リングとして扱われる）ことを確認（Node 上の合成マスク検証：隙間 6px の 2 パーツが閾値 8px で 1 リング化・閾値 4px では 2 リングのまま／幅 40px の隙間は閾値 8px で埋まらない／元マスク ⊆ 充填後（外延性）を確認）
+- [x] 重心・差込口・台座・オーバーレイ・SVG エクスポートが充填後カットラインへ自動追従することを確認（`buildCutline` の戻り値が `runAnalysis` の `contour` としてそのまま下流へ流れるため構造的に追従。要ブラウザ実機確認）
 
 ## 将来拡張（バックログ）
 

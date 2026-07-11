@@ -23,7 +23,7 @@ import { degToRad } from '@/utils/geometry';
  */
 export interface TippingPose {
   readonly role: 'tippingLeft' | 'tippingRight';
-  /** 回転の支点（支持範囲の端、画像下端上のピクセル座標）。 */
+  /** 回転の支点（支持範囲の端、台座上面上のピクセル座標）。 */
   readonly pivot: Point;
   /** 転倒角の大きさ(度)。stability.ts の値と一致する（非負）。表示・ラベル用。 */
   readonly angleDeg: number;
@@ -46,7 +46,9 @@ export interface SimulationShapes {
  * 解析結果から左右の転倒姿勢を構築する。
  *
  * 支点は支持範囲の左右端。mm 座標で保持された supportLeftMm / supportRightMm を
- * mmPerPixel で割ってピクセルへ戻し、画像下端（台座接地面）の高さに置く。
+ * mmPerPixel で割ってピクセルへ戻し、台座上面（接地面）の高さに置く。転倒角の分母
+ * （重心高さ）も台座上面基準で求められているため、支点をこの線に揃えることで
+ * 数値計算と描画の基準が一致する。
  *
  * 回転の向きは、支点まわりに傾けたとき重心が支点の真上へ向かう側に取る。左端を
  * 支点にすると重心（支点より右）は反時計回りで真上へ来るので angleRad は負、右端では
@@ -54,8 +56,8 @@ export interface SimulationShapes {
  * 描画で角度がぶれないようにする。
  */
 export function buildSimulationShapes(result: AnalysisResult): SimulationShapes {
-  const { imageSize, mmPerPixel, base, stability } = result;
-  const baselineY = imageSize.height;
+  const { mmPerPixel, slot, base, stability } = result;
+  const baselineY = slot.baseTopYPixel;
 
   const leftPivot: Point = { x: base.supportLeftMm / mmPerPixel, y: baselineY };
   const rightPivot: Point = { x: base.supportRightMm / mmPerPixel, y: baselineY };

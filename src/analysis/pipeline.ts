@@ -19,9 +19,9 @@
 // null を初めて踏んだ段階に応じたエラー種別へマッピングして早期に返す。例外で
 // クラッシュさせず、UI がメッセージ表示へ落とせる形（AnalysisError）で失敗を伝える。
 
-import { computeBase } from '@/analysis/base';
+import { computeBase, computeBaseTopYPixel } from '@/analysis/base';
 import { polygonCentroid, toCentroid } from '@/analysis/centroid';
-import { attachSlotTab, buildCutline } from '@/analysis/contour';
+import { attachSlotBody, buildCutline } from '@/analysis/contour';
 import { computeMmPerPixel, computePhysicalSize } from '@/analysis/scale';
 import { findSlot } from '@/analysis/slot';
 import { computeStability } from '@/analysis/stability';
@@ -51,9 +51,9 @@ const ERROR_MESSAGES: Record<PipelineErrorKind, string> = {
   transparentImage:
     'アクリル領域（α>0）が見つからないため解析できません。透明でないPNG画像を選択してください。',
   slotPlacementFailed:
-    '差込口を配置できる位置が見つかりません。差込口幅を小さくするか、下端に十分な幅のある画像を使用してください。',
+    '差込部（首部・ツメ）を配置できません。差込口オフセットを小さくする、首部幅を差込口幅より大きくする、などパラメータを見直してください。',
   baseCalculationFailed:
-    '台座サイズを計算できません。安全率やフィギュア高さなどのパラメータを見直してください。',
+    '台座サイズを計算できません。指定した台座幅では重心を支えられない可能性があります。台座幅を広げる、差込口オフセットを小さくする、安全率を下げる、などパラメータを見直してください。',
 };
 
 /** 解析の成否。成功なら結果一式、失敗なら型付きエラー。 */
@@ -149,9 +149,19 @@ export function createCutlineMemo(): CutlineMemo {
   return { key: null, contour: null };
 }
 
-/** カットラインが依存するパラメータだけから成るメモ鍵。 */
+/**
+ * カットラインが依存するパラメータだけから成るメモ鍵。
+ * フィギュア高さはスケール（mm→px 換算）を通じて余白・隙間埋め・連結幅の実効ピクセル値を
+ * 変えるため、鍵に含める。
+ */
 function cutlineKey(params: AnalysisParameters): string {
-  return `${params.figureHeightMm}/${params.cutLineMarginMm}/${params.cutLineSmoothing}/${params.minBridgeWidthMm}`;
+  return [
+    params.figureHeightMm,
+    params.cutLineMarginMm,
+    params.gapFillThresholdMm,
+    params.cutLineSmoothing,
+    params.minBridgeWidthMm,
+  ].join('/');
 }
 
 /**
@@ -161,8 +171,9 @@ function cutlineKey(params: AnalysisParameters): string {
  * 段で mm へ換算する。各ステップの null は「その段で計算不能」を意味し、意味の近い
  * エラー種別へ写して早期に返す。全段を通れば AnalysisResult を組み立てて返す。
  *
- * 唯一重いのはカットライン生成（EDT 膨張＋輪郭抽出、O(W×H)）で、cutlineMemo を渡せば
- * 依存パラメータ（フィギュア高さ・余白・平滑化・連結最小幅）が同じ間は再利用される。
+ * 唯一重いのはカットライン生成（EDT 膨張＋隙間埋め＋輪郭抽出、O(W×H)）で、cutlineMemo を
+ * 渡せば依存パラメータ（フィギュア高さ・余白・隙間埋め閾値・平滑化・連結最小幅）が同じ間は
+ * 再利用される。
  * それ以外（重心・差込口・台座・転倒角）は頂点数に比例する軽量計算のみ。
  *
  * image は寸法だけを使うため、Worker 側は ImageData を持たない {width, height} でも呼べる。
@@ -184,7 +195,8 @@ export function runAnalysis(
 
   // α マスクを余白ぶん膨張・平滑化した「カットライン」を確定する。以降の重心・台座・
   // オーバーレイ・SVG はすべてこのカットライン（が囲む領域）を外形として扱う。
-  // 余白 mm・連結部最小幅 mm はスケールでピクセルへ換算する（解析はピクセル座標で完結）。
+  // 余白 mm・隙間埋め閾値 mm・連結部最小幅 mm はスケールでピクセルへ換算する
+  // （解析はピクセル座標で完結）。
   // O(W×H) と重いため、依存パラメータが変わらない限りメモから再利用する。
   const key = cutlineKey(params);
   let contour: Contour;
@@ -192,12 +204,14 @@ export function runAnalysis(
     contour = cutlineMemo.contour;
   } else {
     const marginPx = params.cutLineMarginMm / mmPerPixel;
+    const gapFillPx = params.gapFillThresholdMm / mmPerPixel;
     const minBridgeWidthPx = params.minBridgeWidthMm / mmPerPixel;
     contour = buildCutline(
       imageAnalysis.mask,
       imageAnalysis.width,
       imageAnalysis.height,
       marginPx,
+      gapFillPx,
       params.cutLineSmoothing,
       minBridgeWidthPx,
     );
@@ -214,28 +228,30 @@ export function runAnalysis(
   }
   const centroid = toCentroid(centroidPixel, mmPerPixel);
 
-  // 差込口中心は重心の真下＋オフセット。縦位置はカットライン足元を基準に決める。
-  const slot = findSlot(contour, centroid, params.slotWidthMm, params.slotOffsetMm, mmPerPixel);
+  // 台座上面は「カットライン最下端 + 持ち上げ量」。板本体が台座へ潜り込まないための
+  // 基準線であり、差込部（首部下端・ツメ上端）・支持範囲・重心高さがすべてこの線を共有する。
+  const baseTopYPixel = computeBaseTopYPixel(contour, params.plateLiftMm, mmPerPixel);
+  if (!Number.isFinite(baseTopYPixel)) {
+    return fail('baseCalculationFailed');
+  }
+
+  // 差込部（首部＋ツメ）の中心は重心の真下＋オフセット。縦位置は台座上面を境に決まる。
+  const slot = findSlot(contour, centroid, params, mmPerPixel, baseTopYPixel);
   if (!slot) {
     return fail('slotPlacementFailed');
   }
 
-  // ツメが本体から離れている場合はカットラインを足元まで下方向へ拡張して一体化する。
+  // 首部・ツメを含むようカットラインを下方向へ拡張し、板本体と一体の外形にする。
   // 以降 result.contour（オーバーレイ・SVG が参照）はこの拡張後の外形になる。
-  const finalContour = attachSlotTab(
-    contour,
-    slot.centerXPixel - slot.widthPixel / 2,
-    slot.centerXPixel + slot.widthPixel / 2,
-    slot.bottomYPixel,
-  );
+  const finalContour = attachSlotBody(contour, slot);
 
-  const base = computeBase(centroid, slot, params);
+  const base = computeBase(centroid, slot, params, baseTopYPixel * mmPerPixel);
   if (!base) {
     return fail('baseCalculationFailed');
   }
 
   // 転倒角の失敗（重心高さ 0 等）も、幾何的に自立し得ない＝台座計算不可の一種として扱う。
-  const stability = computeStability(centroid, base, params);
+  const stability = computeStability(centroid, base);
   if (!stability) {
     return fail('baseCalculationFailed');
   }

@@ -34,7 +34,8 @@ export interface ViewportTransform {
   readonly ty: number;
 }
 
-interface Size {
+/** ビューポート（表示領域）の実サイズ(px)。ルーラーの描画範囲にも使う。 */
+export interface ViewportSize {
   readonly width: number;
   readonly height: number;
 }
@@ -56,6 +57,11 @@ const IDENTITY: ViewportTransform = { scale: 1, tx: 0, ty: 0 };
 export interface UseViewportResult {
   /** 表示領域（overflow-hidden なビューポート）の ref。サイズ計測とイベント基準に使う。 */
   readonly containerRef: React.RefObject<HTMLDivElement | null>;
+  /**
+   * 計測済みの表示領域サイズ（未計測なら null）。ルーラーのように「ビューポート座標で
+   * 固定表示する」オーバーレイが描画範囲を知るために公開する。
+   */
+  readonly containerSize: ViewportSize | null;
   /** 現在の変換。stage の CSS transform に反映する。 */
   readonly transform: ViewportTransform;
   /** ドラッグパン中フラグ。カーソル表示の切り替えに使う。 */
@@ -79,7 +85,7 @@ export interface UseViewportResult {
  * 平行移動へ織り込む。box.x=box.y=0（画像そのもの）なら従来どおり単純な中央寄せになる。
  * カットラインが画像枠外（負座標）へ広がっても box がそれを含むため、Fit で見切れない。
  */
-function computeFit(container: Size, box: ContentBox): ViewportTransform {
+function computeFit(container: ViewportSize, box: ContentBox): ViewportTransform {
   const scale = clamp(
     Math.min(container.width / box.width, container.height / box.height),
     MIN_SCALE,
@@ -93,7 +99,7 @@ function computeFit(container: Size, box: ContentBox): ViewportTransform {
 }
 
 /** 等倍（scale=1）で内容範囲 box を中央寄せする変換。 */
-function computeActual(container: Size, box: ContentBox): ViewportTransform {
+function computeActual(container: ViewportSize, box: ContentBox): ViewportTransform {
   return {
     scale: 1,
     tx: (container.width - box.width) / 2 - box.x,
@@ -133,6 +139,9 @@ export function useViewport(box: ContentBox | null, fitKey: unknown): UseViewpor
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState<ViewportTransform>(IDENTITY);
   const [isPanning, setIsPanning] = useState(false);
+  // ルーラー描画のために表示領域サイズを state としても公開する（ref だけでは再描画が
+  // 走らずリサイズに追従できない）。更新はリサイズ時のみで、頻繁な再レンダーにはならない。
+  const [containerSize, setContainerSize] = useState<ViewportSize | null>(null);
 
   // イベントハンドラ（安定参照）から最新値を参照するための ref 群。これらを ref に
   // 逃がすことで、リスナを張り直さずに済ませる。ref の更新は「描画中の書き込み」を
@@ -141,7 +150,7 @@ export function useViewport(box: ContentBox | null, fitKey: unknown): UseViewpor
   useEffect(() => {
     transformRef.current = transform;
   }, [transform]);
-  const containerSizeRef = useRef<Size | null>(null);
+  const containerSizeRef = useRef<ViewportSize | null>(null);
   const contentRef = useRef<ContentBox | null>(null);
 
   // fitKey ごとに一度だけ自動フィットしたかを記録する。ウィンドウリサイズや box の
@@ -207,7 +216,9 @@ export function useViewport(box: ContentBox | null, fitKey: unknown): UseViewpor
       if (!rect) {
         return;
       }
-      containerSizeRef.current = { width: rect.width, height: rect.height };
+      const size: ViewportSize = { width: rect.width, height: rect.height };
+      containerSizeRef.current = size;
+      setContainerSize(size);
       if (!fittedRef.current && contentRef.current) {
         applyFit();
         fittedRef.current = true;
@@ -292,6 +303,7 @@ export function useViewport(box: ContentBox | null, fitKey: unknown): UseViewpor
 
   return {
     containerRef,
+    containerSize,
     transform,
     isPanning,
     onPointerDown,

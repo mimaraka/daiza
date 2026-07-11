@@ -1,10 +1,10 @@
 // 画像プレビュー領域。
 //
-// 役割は 5 つ：(1) 読み込み済み画像を Canvas に等倍で描く、(2) 解析結果があれば
-// SVG オーバーレイ（外形・重心・差込口・台座・支持範囲・鉛直線）を画像へ重ねる、
+// 役割は 6 つ：(1) 読み込み済み画像を Canvas に等倍で描く、(2) 解析結果があれば
+// SVG オーバーレイ（外形・重心・差込部・台座・支持範囲・鉛直線）を画像へ重ねる、
 // (3) 転倒シミュレーション（左右の限界姿勢）をトグルで重ね描く、(4) PNG のドラッグ
 // ＆ドロップを受け付ける、(5) ホイールズーム・ドラッグパン・Fit・100% の表示操作を
-// 提供する（TODO 9）。
+// 提供する（TODO 9）、(6) 上端・左端に実寸(mm)ルーラーを重ねる（TODO 20-1）。
 //
 // 図形の幾何は render/overlay.ts・render/simulation.ts（いずれも純粋ロジック）が
 // 画像ピクセル座標で算出し、本コンポーネントは role ごとの見た目（色・線種）を与えて
@@ -17,6 +17,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { ImageOff, Loader2, Maximize2, Minus, PersonStanding, Plus, Scan } from 'lucide-react';
 
+import { Ruler } from '@/components/Ruler';
 import { Button } from '@/components/ui/button';
 import { buildOverlayShapes } from '@/render/overlay';
 import { buildSimulationShapes } from '@/render/simulation';
@@ -32,13 +33,18 @@ export interface PreviewProps {
   image: FigureImage | null;
   /** 直近の解析結果。あればオーバーレイを描画する。未解析・失敗時は null。 */
   result?: AnalysisResult | null;
+  /**
+   * スケール換算係数(mm/px)。ルーラーの実寸目盛りに使う。解析結果を待たずに
+   * （フィギュア高さと画像高さから）決まる値なので、result とは別に受け取る。
+   */
+  mmPerPixel?: number | null;
   /** 解析の進行状態。'analyzing' の間は解析中インジケータを重ねる。 */
   status?: AnalysisStatus;
   /** ドロップされた PNG ファイルを通知する。未指定ならドロップは受け付けない。 */
   onImageFile?: (file: File) => void;
 }
 
-export function Preview({ image, result, status, onImageFile }: PreviewProps) {
+export function Preview({ image, result, mmPerPixel, status, onImageFile }: PreviewProps) {
   // ドラッグ中はドロップ可能であることを視覚的に示すためのフラグ。
   const [isDragOver, setIsDragOver] = useState(false);
   // 転倒シミュレーション（左右の限界姿勢）の表示切替。常時重ねると主オーバーレイが
@@ -80,10 +86,10 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
     for (const p of overlay.contour.points) {
       include(p.x, p.y);
     }
-    include(overlay.slot.x, overlay.slot.y);
-    include(overlay.slot.x + overlay.slot.width, overlay.slot.y + overlay.slot.height);
-    include(overlay.base.x, overlay.base.y);
-    include(overlay.base.x + overlay.base.width, overlay.base.y + overlay.base.height);
+    for (const rect of [overlay.neck, overlay.tab, overlay.base]) {
+      include(rect.x, rect.y);
+      include(rect.x + rect.width, rect.y + rect.height);
+    }
     include(overlay.support.from.x, overlay.support.from.y);
     include(overlay.support.to.x, overlay.support.to.y);
     include(overlay.plumb.from.x, overlay.plumb.from.y);
@@ -95,6 +101,7 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
   // パラメータ変更（box の変化）ではユーザーのズーム/パンを保つ。
   const {
     containerRef,
+    containerSize,
     transform,
     isPanning,
     onPointerDown,
@@ -238,7 +245,7 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
                   strokeWidth={1 / s}
                 />
 
-                {/* 台座（緑矩形）。差込口・支持範囲より背面に置くため先に描く。 */}
+                {/* 台座（緑矩形）。上辺が台座上面。差込部・支持範囲より背面に置くため先に描く。 */}
                 <rect
                   x={overlay.base.x}
                   y={overlay.base.y}
@@ -249,16 +256,20 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
                   strokeWidth={1.5 / s}
                 />
 
-                {/* 差込口（青矩形）。 */}
-                <rect
-                  x={overlay.slot.x}
-                  y={overlay.slot.y}
-                  width={overlay.slot.width}
-                  height={overlay.slot.height}
-                  fill="rgba(37, 99, 235, 0.25)"
-                  stroke="rgb(37, 99, 235)"
-                  strokeWidth={1.5 / s}
-                />
+                {/* 差込部（青矩形 2 つ）。首部＝板と台座の隙間を埋める広い矩形、ツメ＝台座上面
+                    より下へ挿さる狭い矩形。幅の差でできる肩が台座上面に乗って止まる。 */}
+                {[overlay.neck, overlay.tab].map((rect) => (
+                  <rect
+                    key={rect.role}
+                    x={rect.x}
+                    y={rect.y}
+                    width={rect.width}
+                    height={rect.height}
+                    fill="rgba(37, 99, 235, 0.25)"
+                    stroke="rgb(37, 99, 235)"
+                    strokeWidth={1.5 / s}
+                  />
+                ))}
 
                 {/* 支持範囲（オレンジ線）。 */}
                 <line
@@ -294,6 +305,18 @@ export function Preview({ image, result, status, onImageFile }: PreviewProps) {
               </svg>
             )}
           </div>
+
+          {/* ルーラー（上端・左端、実寸 mm）。stage ではなくビューポートに固定表示し、
+              transform から目盛り位置を算出してズーム・パンへ追従させる。pointer-events は
+              持たないため、下のプレビューのドラッグパン・ホイールズームを妨げない。 */}
+          {containerSize && mmPerPixel != null && (
+            <Ruler
+              width={containerSize.width}
+              height={containerSize.height}
+              transform={transform}
+              mmPerPixel={mmPerPixel}
+            />
+          )}
 
           {/* 表示操作コントロール。stage の上（右下）へ重ねる。ボタン操作でパンが
               誤発火しないよう、ここでの pointerdown はコンテナへ伝播させない。 */}

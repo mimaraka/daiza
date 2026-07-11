@@ -30,14 +30,50 @@ export const DEFAULT_PARAMETERS: AnalysisParameters = {
   // 余白は SPEC 既定の 3mm。平滑化は「最小（無効）」から始め、UI で強められるようにする。
   cutLineMarginMm: 3,
   cutLineSmoothing: 0,
+  // 隙間埋めは形状を変える操作なので、既定では無効（0）にしてユーザーの明示指定に委ねる。
+  gapFillThresholdMm: 0,
   // 分離パーツ連結部の最小幅。板厚（既定 3mm）と同程度を既定とし、細すぎる連結を防ぐ。
   minBridgeWidthMm: 3,
-  slotWidthMm: 5,
+  slotWidthMm: 20,
   // 差込口は既定で重心の真下（オフセット 0）。
   slotOffsetMm: 0,
+  // 首部は差込口幅（20mm）より十分広く取り、肩を確保する。
+  neckWidthMm: 40,
+  // 既定では板の下端が台座上面にちょうど接する（持ち上げなし）。
+  plateLiftMm: 0,
   safetyFactor: 1.3,
-  baseMarginMm: 5,
+  // 台座幅は指定値がそのまま実寸になる（余白ではない）。一般的なアクリルスタンドの台座幅。
+  baseWidthMm: 50,
 };
+
+/**
+ * 首部の肩（ショルダー）の片側最小幅(mm)。
+ * 肩は台座上面に乗って挿入深さをツメ深さで止めるストッパーであり、これが 0 だと
+ * アクリル板がツメより深く台座へ刺さり込む。実加工で意味を持つ最小限として 0.5mm を採る。
+ */
+export const MIN_SHOULDER_WIDTH_MM = 0.5;
+
+/**
+ * 与えられた差込口幅に対して成立する首部幅の下限(mm)。
+ * 首部幅 ≧ 差込口幅 + 2×最小ショルダー幅（SPEC「制約：首部幅 > 差込口幅」）。
+ * 浮動小数の桁あふれ（5.6000000000000005 等）を UI へ出さないよう 3 桁で丸める。
+ */
+export function minNeckWidthMm(slotWidthMm: number): number {
+  return Math.round((slotWidthMm + 2 * MIN_SHOULDER_WIDTH_MM) * 1000) / 1000;
+}
+
+/**
+ * パラメータ間の不変条件を満たすよう正規化する。
+ *
+ * 現状の不変条件は「首部幅 ≧ 下限（差込口幅依存）」のみ。差込口幅を広げた結果として
+ * 首部幅が下限を割る場合は、肩が消えないよう首部幅を自動的に下限まで押し上げる。
+ * UI 側の入力制約だけに頼ると（差込口幅を先に変えるなど）容易に破れるため、状態遷移の
+ * 中心である reducer で常に強制し、解析側は制約成立を前提にできるようにする。
+ */
+export function normalizeParameters(params: AnalysisParameters): AnalysisParameters {
+  const minNeck = minNeckWidthMm(params.slotWidthMm);
+  return params.neckWidthMm < minNeck ? { ...params, neckWidthMm: minNeck } : params;
+}
 
 /**
  * スライダー等の入力 UI・バリデーションで共有するパラメータ制約。
@@ -48,13 +84,19 @@ export const PARAMETER_CONSTRAINTS = {
   thicknessMm: { min: 0.1, max: 20, step: 0.1 },
   cutLineMarginMm: { min: 0, max: 10, step: 0.5 },
   cutLineSmoothing: { min: 0, max: 5, step: 1 },
+  // 0 は「隙間埋め無効」を表す（クロージング自体をスキップする）。
+  gapFillThresholdMm: { min: 0, max: 20, step: 0.5 },
   // 連結部は 0 幅だと union で結合できないため下限を正値にする。
   minBridgeWidthMm: { min: 0.5, max: 20, step: 0.5 },
   slotWidthMm: { min: 0.1, max: 50, step: 0.1 },
   // オフセットは左右対称に振れるよう負値も許容する（正=右／負=左）。
   slotOffsetMm: { min: -50, max: 50, step: 0.5 },
+  // 首部幅の実効下限は差込口幅に連動する（minNeckWidthMm）。ここでの min は絶対的な床。
+  neckWidthMm: { min: 1, max: 100, step: 0.5 },
+  plateLiftMm: { min: 0, max: 50, step: 0.5 },
   safetyFactor: { min: 1.0, max: 2.0, step: 0.1 },
-  baseMarginMm: { min: 0, max: 30, step: 1 },
+  // 指定値がそのまま台座の実寸幅になるため、下限は「スリットが切れる」程度の正値に取る。
+  baseWidthMm: { min: 1, max: 300, step: 1 },
 } as const satisfies Record<keyof AnalysisParameters, { min: number; max: number; step: number }>;
 
 /**
@@ -121,9 +163,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       // analyzing へ進める。結果が無い状態（初回解析中・エラー表示中）は状態を保ち、
       // 再解析の成否が届いた時点で置き換える（第 1 相失敗などで再解析自体が走らない
       // ケースで、スピナーが出続けるのを防ぐ）。
+      // 正規化を通し、パラメータ間の不変条件（首部幅 > 差込口幅）を常に成立させる。
       return {
         ...state,
-        parameters: { ...state.parameters, ...action.parameters },
+        parameters: normalizeParameters({ ...state.parameters, ...action.parameters }),
         status: state.result ? 'analyzing' : state.status,
       };
 

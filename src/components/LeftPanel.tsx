@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
-import { PARAMETER_CONSTRAINTS, PARAMETER_PRESETS } from '@/model/state';
+import { minNeckWidthMm, PARAMETER_CONSTRAINTS, PARAMETER_PRESETS } from '@/model/state';
 import type { AnalysisParameters } from '@/model/types';
 
 export interface LeftPanelProps {
@@ -170,6 +170,13 @@ export function LeftPanel({
 }: LeftPanelProps) {
   const safety = PARAMETER_CONSTRAINTS.safetyFactor;
   const smoothing = PARAMETER_CONSTRAINTS.cutLineSmoothing;
+  // 首部幅の下限は差込口幅に連動する（肩が消えないための不変条件）。入力側でも下限を
+  // 差込口幅へ追従させ、そもそも制約を割る値を入れられないようにする（状態側の
+  // normalizeParameters が最終的な番人）。
+  const neckWidth = {
+    ...PARAMETER_CONSTRAINTS.neckWidthMm,
+    min: minNeckWidthMm(parameters.slotWidthMm),
+  };
   // ネイティブのファイル選択ダイアログは非表示 input を経由して開く。
   // 見た目は shadcn の Button に統一し、input 自体は UI から隠す。
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -261,6 +268,16 @@ export function LeftPanel({
             />
           </div>
 
+          {/* 0 は隙間埋め無効。閾値より狭い隙間だけがアクリルで充填される。 */}
+          <NumberField
+            id="gap-fill-threshold"
+            label="隙間埋め閾値（0=無効）"
+            unit="mm"
+            value={parameters.gapFillThresholdMm}
+            constraint={PARAMETER_CONSTRAINTS.gapFillThresholdMm}
+            onValueChange={(gapFillThresholdMm) => onParametersChange({ gapFillThresholdMm })}
+          />
+
           <NumberField
             id="min-bridge-width"
             label="パーツ連結部の最小幅"
@@ -286,6 +303,22 @@ export function LeftPanel({
             constraint={PARAMETER_CONSTRAINTS.slotOffsetMm}
             onValueChange={(slotOffsetMm) => onParametersChange({ slotOffsetMm })}
           />
+          <NumberField
+            id="neck-width"
+            label={`首部幅（下限 ${neckWidth.min}mm）`}
+            unit="mm"
+            value={parameters.neckWidthMm}
+            constraint={neckWidth}
+            onValueChange={(neckWidthMm) => onParametersChange({ neckWidthMm })}
+          />
+          <NumberField
+            id="plate-lift"
+            label="アクリル板の持ち上げ量"
+            unit="mm"
+            value={parameters.plateLiftMm}
+            constraint={PARAMETER_CONSTRAINTS.plateLiftMm}
+            onValueChange={(plateLiftMm) => onParametersChange({ plateLiftMm })}
+          />
 
           <div className="grid gap-1.5">
             <div className="flex items-center justify-between">
@@ -310,12 +343,12 @@ export function LeftPanel({
           </div>
 
           <NumberField
-            id="base-margin"
-            label="台座余白"
+            id="base-width"
+            label="台座幅"
             unit="mm"
-            value={parameters.baseMarginMm}
-            constraint={PARAMETER_CONSTRAINTS.baseMarginMm}
-            onValueChange={(baseMarginMm) => onParametersChange({ baseMarginMm })}
+            value={parameters.baseWidthMm}
+            constraint={PARAMETER_CONSTRAINTS.baseWidthMm}
+            onValueChange={(baseWidthMm) => onParametersChange({ baseWidthMm })}
           />
         </CardContent>
       </Card>

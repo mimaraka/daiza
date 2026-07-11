@@ -51,7 +51,7 @@ function buildRows(result: AnalysisResult | null, safetyFactor: number): ResultR
     },
     { label: '差込口中心', value: num(result?.slot.centerXMm, 'mm') },
     { label: '差込口幅', value: num(result?.slot.widthMm, 'mm') },
-    { label: '推奨台座幅', value: num(result?.base.widthMm, 'mm') },
+    { label: '台座幅', value: num(result?.base.widthMm, 'mm') },
     { label: '推奨奥行', value: num(result?.base.depthMm, 'mm') },
     {
       label: '転倒角（左）',

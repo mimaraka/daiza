@@ -24,9 +24,9 @@ export interface OverlayCircle {
   readonly radius: number;
 }
 
-/** 差込口（青矩形）／台座（緑矩形）。左上原点 (x, y) と幅・高さ。 */
+/** 差込部の首部・ツメ（青矩形）／台座（緑矩形）。左上原点 (x, y) と幅・高さ。 */
 export interface OverlayRect {
-  readonly role: 'slot' | 'base';
+  readonly role: 'slotNeck' | 'slotTab' | 'base';
   readonly x: number;
   readonly y: number;
   readonly width: number;
@@ -47,7 +47,10 @@ export interface OverlaySegment {
 export interface OverlayShapes {
   readonly contour: OverlayPolygon;
   readonly centroid: OverlayCircle;
-  readonly slot: OverlayRect;
+  /** 差込部の首部（幅=首部幅、カットライン下辺〜台座上面）。 */
+  readonly neck: OverlayRect;
+  /** 差込部のツメ（幅=差込口幅、台座上面から板厚ぶん下）。 */
+  readonly tab: OverlayRect;
   readonly base: OverlayRect;
   readonly support: OverlaySegment;
   readonly plumb: OverlaySegment;
@@ -56,57 +59,60 @@ export interface OverlayShapes {
 /**
  * 重心マーカーの半径。
  * 画像解像度に比例させ、3000px 級でも豆粒にならないようにしつつ、下限も設けて
- * 小さな画像で消えないようにする。ズーム時に画面上で一定サイズへ保つ調整は
- * 表示操作（TODO 9）側の責務とし、ここでは画像基準の素直な大きさを与える。
+ * 小さな画像で消えないようにする。大きすぎると形状が隠れて見づらいため、SPEC の
+ * 指定どおり従来（画像短辺の 1%・下限 3px）の約 50% に抑える。ズーム時に画面上で
+ * 一定サイズへ保つ調整は表示操作側の責務とし、ここでは画像基準の素直な大きさを与える。
  */
 function centroidRadius(width: number, height: number): number {
-  return Math.max(3, Math.min(width, height) * 0.01);
-}
-
-/**
- * 台座（緑矩形）の見かけの縦厚み。
- * 前面図における台座の縦寸法は現段階のモデルに存在しないため、画像高さに対する
- * 小さな一定割合で模式的に描く。台座の実寸モデル化（TODO 11 以降）で置き換える。
- */
-function baseBandHeight(height: number): number {
-  return Math.max(2, height * 0.015);
+  return Math.max(1.5, Math.min(width, height) * 0.005);
 }
 
 /**
  * 解析結果からオーバーレイ図形一式を構築する。
  *
  * mm 座標で保持している値（台座幅・支持範囲）は mmPerPixel で割ってピクセル座標へ
- * 戻す。支持範囲・台座・支持線は画像最下端を共通のベースラインとして配置し、
- * 重心の鉛直線をそのベースラインまで下ろすことで「重心の真下が支持範囲内か」を
- * 目視できるようにする。
+ * 戻す。支持範囲・台座・鉛直線は**台座上面**（カットライン最下端 + 持ち上げ量）を共通の
+ * ベースラインとして配置し、重心の鉛直線をそこまで下ろすことで「重心の真下が支持範囲内か」
+ * を目視できるようにする。画像下端ではなく台座上面を基準にするのは、カットライン余白で
+ * 外形が画像下端より下へ広がっても板が台座に潜り込まないようにするため（SPEC「アクリル板と
+ * 台座の上下関係」）。
  */
 export function buildOverlayShapes(result: AnalysisResult): OverlayShapes {
   const { imageSize, mmPerPixel, contour, centroid, slot, base } = result;
   const width = imageSize.width;
   const height = imageSize.height;
 
-  // 支持範囲・台座・鉛直線の基準となる画像最下端。
-  const baselineY = height;
+  // 支持範囲・台座・鉛直線の基準となる台座上面（＝首部下端＝ツメ上端）。
+  const baselineY = slot.baseTopYPixel;
 
-  const slotRect: OverlayRect = {
-    role: 'slot',
-    x: slot.centerXPixel - slot.widthPixel / 2,
-    y: slot.yPixel,
-    width: slot.widthPixel,
-    // 差込口（ツメ）は上端 yPixel から足元 bottomYPixel（カットライン最下端）までの縦帯。
-    // カットラインは余白ぶん画像下端より下へ広がり得るため、画像下端ではなくツメ下端を使う。
-    height: Math.max(0, slot.bottomYPixel - slot.yPixel),
+  const neckRect: OverlayRect = {
+    role: 'slotNeck',
+    x: slot.neck.xPixel,
+    y: slot.neck.yPixel,
+    width: slot.neck.widthPixel,
+    height: slot.neck.heightPixel,
   };
 
-  // 台座幅は実寸(mm)。ピクセルへ戻し、差込口中心に合わせて左右対称に配置する。
+  const tabRect: OverlayRect = {
+    role: 'slotTab',
+    x: slot.tab.xPixel,
+    y: slot.tab.yPixel,
+    width: slot.tab.widthPixel,
+    height: slot.tab.heightPixel,
+  };
+
+  // 台座（緑矩形）：上辺を台座上面に合わせ、下方向へ描く。前面図における台座の縦寸法は
+  // 板厚（＝ツメ深さ）とする。奥行(depthMm)は上面図の寸法であり、前面図の縦へ載せると
+  // 重心高さ由来の大きな値がそのまま縦長の帯になって形状を覆い隠すため使わない。
+  // 縦をツメ深さに揃えることで、ツメが台座を貫通していない（＝ちょうど収まる）ことも
+  // そのまま目で確認できる。
   const baseWidthPixel = base.widthMm / mmPerPixel;
-  const band = baseBandHeight(height);
   const baseRect: OverlayRect = {
     role: 'base',
     x: slot.centerXPixel - baseWidthPixel / 2,
-    y: baselineY - band,
+    y: baselineY,
     width: baseWidthPixel,
-    height: band,
+    height: slot.tab.heightPixel,
   };
 
   // 支持範囲（オレンジ線）：mm 座標の左右端をピクセルへ戻した水平線分。
@@ -130,7 +136,8 @@ export function buildOverlayShapes(result: AnalysisResult): OverlayShapes {
       center: centroid.pixel,
       radius: centroidRadius(width, height),
     },
-    slot: slotRect,
+    neck: neckRect,
+    tab: tabRect,
     base: baseRect,
     support,
     plumb,

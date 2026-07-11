@@ -1,4 +1,5 @@
-// 距離変換（EDT）とマスク膨張：カットライン余白の「真のオフセット」を画像空間で行う。
+// 距離変換（EDT）とマスクの形態学的操作：カットライン余白の「真のオフセット」（膨張）と、
+// 狭い隙間の充填（膨張→収縮＝クロージング）を画像空間で行う。
 //
 // カットライン余白（SPEC「余白(mm)ぶん外側へオフセットした線」）は、以前はポリゴンの
 // 素朴なミターオフセット＋ union（自己交差除去）で実装していた。しかし髪の毛のような
@@ -13,7 +14,9 @@
 //   - 結果のマスク境界は構造的に自己交差しない（union が不要になる）、
 //   - 計算量は輪郭の複雑さに依存しない O(W×H)（実測：3000px 級で 300ms 前後）、
 //   - 余白以内に近接する分離パーツは自動的に結合される、
-// という性質を持つ。React にも DOM にも依存しない純粋ロジック。
+// という性質を持つ。収縮（erodeMask）は同じ EDT を背景に対して取るだけの双対であり、
+// 膨張との合成（closeMask）が SPEC の「狭い隙間の充填」になる。
+// React にも DOM にも依存しない純粋ロジック。
 //
 // EDT は Felzenszwalb–Huttenlocher の 2 パス法（列方向 → 行方向、放物線の下側包絡）。
 // 各パスは 1 次元の距離変換で、全体で厳密なユークリッド二乗距離が得られる。
@@ -134,16 +137,27 @@ export interface DilatedMask {
   offsetY: number;
 }
 
+/** マスク膨張時に確保するパディング。境界の円弧が格子丸めで欠けないよう +2 の余裕を取る。 */
+function padFor(radius: number): number {
+  return Math.ceil(radius) + 2;
+}
+
+/**
+ * 膨張半径をグリッド長辺でクランプする。
+ * 余白(mm)をピクセルへ換算する際、フィギュア高さが極端に小さいと radius が画像サイズの
+ * 何倍にもなり、パディングでメモリが暴走し得る。長辺ぶん膨張すれば形状はほぼ円板に飽和
+ * しており、それ以上広げる意味もない。
+ */
+function clampRadius(radiusPx: number, width: number, height: number): number {
+  return Math.min(radiusPx, Math.max(width, height));
+}
+
 /**
  * マスクを半径 radiusPx の円板で膨張する（真のオフセット＝ミンコフスキー和）。
  *
  * 膨張は画像枠の外側（特に足元の下方向）へはみ出すため、グリッドを pad = ceil(radius)+2
- * だけ全周に広げてから EDT → しきい値化する（+2 は境界の円弧が格子丸めで欠けないための
- * 安全マージン）。呼び出し側は offsetX/offsetY で輪郭を元画像座標へ平行移動して使う。
- *
- * radius はグリッドの長辺でクランプする。余白(mm)をピクセルへ換算する際、フィギュア高さが
- * 極端に小さいと radius が画像サイズの何倍にもなり、パディングでメモリが暴走し得るため。
- * 長辺ぶん膨張すれば形状はほぼ円板に飽和しており、それ以上広げる意味もない。
+ * だけ全周に広げてから EDT → しきい値化する。呼び出し側は offsetX/offsetY で輪郭を
+ * 元画像座標へ平行移動して使う。
  *
  * radius が非正・非有限なら膨張なしとして入力をそのまま返す（余白 0 ＝生の外形）。
  */
@@ -157,8 +171,8 @@ export function dilateMask(
     return { mask, width, height, offsetX: 0, offsetY: 0 };
   }
 
-  const radius = Math.min(radiusPx, Math.max(width, height));
-  const pad = Math.ceil(radius) + 2;
+  const radius = clampRadius(radiusPx, width, height);
+  const pad = padFor(radius);
   const paddedWidth = width + pad * 2;
   const paddedHeight = height + pad * 2;
 
@@ -169,7 +183,7 @@ export function dilateMask(
 
   const dist = squaredDistanceTransform(padded, paddedWidth, paddedHeight);
 
-  // 二乗距離のまま比較し、sqrt を全画素ぶん省く。
+  // 二乗距離のまま比較し、sqrt を全画素ぶん省く。「充填画素まで radius 以内」＝膨張後の内側。
   const radiusSq = radius * radius;
   const dilated = new Uint8Array(paddedWidth * paddedHeight);
   for (let i = 0; i < dilated.length; i++) {
@@ -182,5 +196,87 @@ export function dilateMask(
     height: paddedHeight,
     offsetX: -pad,
     offsetY: -pad,
+  };
+}
+
+/**
+ * マスクを半径 radiusPx の円板で収縮する（dilateMask の双対）。
+ *
+ * 膨張が「充填画素までの距離 ≦ r」だったのに対し、収縮は「背景画素までの距離 > r」＝
+ * 半径 r の円板がマスク内部に完全に収まる点だけを残す。EDT を背景（mask=0）を充填と
+ * みなして取ることで、同じ 2 パス EDT 基盤をそのまま流用できる。
+ *
+ * 膨張と違い領域は縮むだけなのでグリッドは広げず、入力と同じ座標系のマスクを返す。
+ * ただしグリッド外は「背景でも充填でもない」扱い（EDT の対象外）なので、グリッド境界に
+ * 接する領域は境界の外側から削られない。クロージング用途では膨張が確保したパディングが
+ * 常に背景として周囲を囲むため、この扱いで期待どおりの結果になる。
+ *
+ * radius が非正・非有限なら収縮なしとして入力をそのまま返す。
+ */
+export function erodeMask(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radiusPx: number,
+): Uint8Array {
+  if (!Number.isFinite(radiusPx) || radiusPx <= 0) {
+    return mask;
+  }
+
+  const radius = clampRadius(radiusPx, width, height);
+
+  // 背景を充填とみなした EDT → 各画素から最も近い背景画素までの二乗距離。
+  const background = new Uint8Array(width * height);
+  for (let i = 0; i < background.length; i++) {
+    background[i] = mask[i] === 1 ? 0 : 1;
+  }
+  const dist = squaredDistanceTransform(background, width, height);
+
+  // 背景までの距離が radius を「超える」画素だけが、半径 radius の円板を内部に収められる。
+  const radiusSq = radius * radius;
+  const eroded = new Uint8Array(width * height);
+  for (let i = 0; i < eroded.length; i++) {
+    eroded[i] = (dist[i] ?? 0) > radiusSq ? 1 : 0;
+  }
+  return eroded;
+}
+
+/**
+ * マスクへ半径 radiusPx の円板でモルフォロジカルクロージング（膨張 → 収縮）を施す。
+ *
+ * SPEC「狭い隙間の充填（隙間埋め）」の中核。半径 r の円板によるクロージングは
+ * 「半径 r の円板が入り込めない隙間」＝**幅が 2r 未満の隙間だけ**を充填し、それ以外の
+ * 領域は変えない（充填の要否判定と充填処理が単一の操作で同時に達成される）。充填後の
+ * 境界は円板の包絡（半径 r の円弧）になるため、隙間は自動的になめらかに補間され、
+ * 折れ線状の継ぎ目や尖りは生じない。分離パーツ間の隙間にも、同一パーツ内のくびれ
+ * （向かい合う凹部）にも同様に働く。
+ *
+ * 膨張は枠外へはみ出すため、返すグリッドは dilateMask 同様パディングぶん広く、原点が
+ * ずれている（offsetX/offsetY で元座標へ戻す）。収縮側は膨張が作ったパディング（背景）を
+ * そのまま使うため、膨張前のマスクは常に結果へ含まれる（クロージングの外延性）。
+ *
+ * radius が非正・非有限なら何もせず入力をそのまま返す（隙間埋め無効）。
+ */
+export function closeMask(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radiusPx: number,
+): DilatedMask {
+  if (!Number.isFinite(radiusPx) || radiusPx <= 0) {
+    return { mask, width, height, offsetX: 0, offsetY: 0 };
+  }
+
+  // 膨張と収縮で同じ半径を使わないと形状が痩せる／太るため、クランプ後の値を共有する。
+  const radius = clampRadius(radiusPx, width, height);
+  const dilated = dilateMask(mask, width, height, radius);
+  const eroded = erodeMask(dilated.mask, dilated.width, dilated.height, radius);
+
+  return {
+    mask: eroded,
+    width: dilated.width,
+    height: dilated.height,
+    offsetX: dilated.offsetX,
+    offsetY: dilated.offsetY,
   };
 }

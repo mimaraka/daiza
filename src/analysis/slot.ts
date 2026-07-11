@@ -1,132 +1,115 @@
-// 差込口配置：差込口（ツメ）中心を「重心X + 差込口オフセット」に置く。
+// 差込部の配置：中心を「重心X + 差込口オフセット」に置き、「首部＋ツメ」の 2 矩形を確定する。
 //
-// アクリルフィギュアは下端の「ツメ」を台座のスリット（差込口）へ挿し込む。SPEC の
-// 改訂により、差込口は画像最下部の充填スパンから探索するのではなく、
+// アクリルフィギュアは下端の「ツメ」を台座のスリット（差込口）へ挿し込む。SPEC の改訂により、
+// 差込部は画像最下部の充填スパンから探索するのではなく、
 //
-//   差込口中心 X = 重心X + 差込口オフセット
+//   差込部中心 X = 重心X + 差込口オフセット
 //
-// で決める。ツメは基本的に重心の真下へ置き、左右方向の微調整だけをオフセットで行う。
+// で決める。差込部は基本的に重心の真下へ置き、左右方向の微調整だけをオフセットで行う。
 //
-// ツメの縦位置は「カットライン（アクリル外形）の最下端＝足元」に下端を合わせる。ツメが
-// 本体（既存カットライン）から離れている（差込口X の位置でカットラインが足元まで届いて
-// いない）場合は、呼び出し側（pipeline）が analysis/contour の attachSlotTab でカットラインを
-// 下方向へ拡張して一体化する。ここではその判断材料となる縦帯（上端・下端）を返す。
+// 縦方向は台座上面（カットライン最下端 + 持ち上げ量。呼び出し側が算出）を境界に 2 段構成とする：
+//
+//   首部 … 幅 = 首部幅。カットライン下辺〜台座上面。板と台座の隙間・板下端の凹凸を埋める。
+//   ツメ … 幅 = 差込口幅（首部より狭い）。台座上面から板厚ぶん下へ挿さる。
+//
+// 幅の差でできる肩（ショルダー）が台座上面に乗ることで、挿入深さがツメ深さ（板厚）で止まる。
+// この肩が設計上の要であり、首部幅 ≦ 差込口幅 では成立しないため制約として検査する
+// （通常は model/state の normalizeParameters が状態遷移の時点で成立させている）。
+//
+// 実際のカットライン拡張（首部・ツメを外形へ一体化する）は analysis/contour の
+// attachSlotBody が担う。ここではその形状（矩形 2 つ）と接続位置だけを決める。
 //
 // React には依存しない純粋ロジック。座標は画像左上原点・下方向 +Y。
 
-import type { Centroid, Contour, SlotResult } from '@/model/types';
+import { lowerCrossing } from '@/analysis/contour';
 import { pixelLengthToMm } from '@/analysis/scale';
-
-/** ツメ縦帯の最小表示高さを決める、カットライン縦幅に対する割合。 */
-const MIN_TAB_BAND_RATIO = 0.03;
-
-/** カットラインの縦方向レンジ（最上端・最下端 Y、ピクセル）。 */
-interface VerticalExtent {
-  minY: number;
-  maxY: number;
-}
-
-/** カットライン頂点列の Y レンジを 1 パスで求める（spread を避け巨大頂点列でも安全）。 */
-function verticalExtent(contour: Contour): VerticalExtent {
-  let minY = Number.POSITIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const p of contour) {
-    if (p.y < minY) minY = p.y;
-    if (p.y > maxY) maxY = p.y;
-  }
-  return { minY, maxY };
-}
+import { minNeckWidthMm } from '@/model/state';
+import type { AnalysisParameters, Centroid, Contour, SlotResult } from '@/model/types';
 
 /**
- * X 区間 [xL, xR] における、カットライン下辺の最も深い（Y 最大）位置を求める。
+ * 差込部（首部・ツメ）の位置と形状を決める。
  *
- * 区間内の頂点に加え、区間端の垂直線 x=xL / x=xR とカットラインの交点も考慮する
- * （差込口幅が狭く区間内に頂点が無い場合を取りこぼさないため）。この値が足元
- * （カットライン最下端）から離れているほど、ツメは本体から浮いており拡張が要る。
- */
-function deepestBoundaryInRange(contour: Contour, xL: number, xR: number): number {
-  let deepest = Number.NEGATIVE_INFINITY;
-
-  // 区間内の頂点。
-  for (const p of contour) {
-    if (p.x >= xL && p.x <= xR && p.y > deepest) {
-      deepest = p.y;
-    }
-  }
-
-  // 区間端の垂直線との交点（辺が区間端をまたぐ箇所）。
-  const n = contour.length;
-  for (let i = 0; i < n; i++) {
-    const a = contour[i];
-    const b = contour[(i + 1) % n];
-    if (!a || !b) continue;
-    for (const x of [xL, xR]) {
-      // 半開区間で straddle 判定し、共有頂点での二重計上を避ける。
-      const straddles = (a.x <= x && x < b.x) || (b.x <= x && x < a.x);
-      if (!straddles) continue;
-      const t = (x - a.x) / (b.x - a.x);
-      const y = a.y + t * (b.y - a.y);
-      if (y > deepest) deepest = y;
-    }
-  }
-
-  return deepest;
-}
-
-/**
- * 差込口（ツメ）位置を決める。
+ * 中心 X は「重心X + 差込口オフセット」。首部は、その中心に首部幅ぶんの矩形を取り、
+ * 上端をカットライン下辺（左右端の下辺交点のうち浅い方＝板と確実に重なる高さ）に、
+ * 下端を台座上面 baseTopYPixel に合わせる。ツメは台座上面から板厚ぶん下へ伸ばす。
  *
- * 中心 X は「重心X + 差込口オフセット」。縦は、下端をカットライン最下端（足元）へ、
- * 上端を差込口X 区間でカットラインが届いている深さ（deepest）に合わせる。ツメが足元まで
- * 届いていない（deepest が足元より浅い）場合は縦帯がその隙間を可視化し、届いている場合は
- * 帯が潰れないよう最小高さを確保する。実際のカットライン拡張は呼び出し側が担う。
- *
- * スケールが不正（mmPerPixel が非有限・非正）／差込口幅が不正／カットラインが退化
- * （3 頂点未満）な場合は配置不能として null を返し、slotPlacementFailed へマッピングさせる。
+ * null（＝差込口配置不可）を返すのは：
+ *  - カットラインが退化（3 頂点未満）／スケール・幅・オフセットが不正
+ *  - 首部幅が下限（差込口幅 + 2×最小ショルダー幅）を割り、肩が成立しない
+ *  - 首部の左右端がカットラインの下辺と交わらない（差込部が板から外れており一体化できない）
+ * いずれも呼び出し側で slotPlacementFailed へマッピングさせる。
  */
 export function findSlot(
   contour: Contour,
   centroid: Centroid,
-  slotWidthMm: number,
-  slotOffsetMm: number,
+  params: AnalysisParameters,
   mmPerPixel: number,
+  baseTopYPixel: number,
 ): SlotResult | null {
-  if (contour.length < 3) {
+  const { slotWidthMm, slotOffsetMm, neckWidthMm, thicknessMm } = params;
+
+  if (contour.length < 3 || !(mmPerPixel > 0) || !Number.isFinite(baseTopYPixel)) {
+    return null;
+  }
+
+  // 肩が消えると板がツメより深く台座へ刺さり込む。制約が破れていれば配置不可として扱う。
+  if (!(neckWidthMm >= minNeckWidthMm(slotWidthMm))) {
     return null;
   }
 
   const slotWidthPixel = slotWidthMm / mmPerPixel;
+  const neckWidthPixel = neckWidthMm / mmPerPixel;
+  const tabDepthPixel = thicknessMm / mmPerPixel;
   const offsetPixel = slotOffsetMm / mmPerPixel;
-  if (!Number.isFinite(slotWidthPixel) || slotWidthPixel <= 0 || !Number.isFinite(offsetPixel)) {
+  if (
+    !(slotWidthPixel > 0) ||
+    !(neckWidthPixel > 0) ||
+    !(tabDepthPixel > 0) ||
+    !Number.isFinite(offsetPixel)
+  ) {
     return null;
   }
 
-  // SPEC の定義どおり、差込口中心は重心の真下（重心X）＋左右オフセット。
+  // SPEC の定義どおり、差込部中心は重心の真下（重心X）＋左右オフセット。
   const centerXPixel = centroid.pixel.x + offsetPixel;
-  const xL = centerXPixel - slotWidthPixel / 2;
-  const xR = centerXPixel + slotWidthPixel / 2;
+  const neckLeftX = centerXPixel - neckWidthPixel / 2;
+  const neckRightX = centerXPixel + neckWidthPixel / 2;
 
-  const { minY, maxY } = verticalExtent(contour);
-  // 足元＝カットライン最下端。ツメの下端はここへ合わせる。
-  const footY = maxY;
+  // 首部の左右端がカットライン下辺と交わる高さ。ここが首部と板本体の接続部になる。
+  // 交点が無い＝差込部が板の外にはみ出しており、一体形状としてカットできない。
+  const left = lowerCrossing(contour, neckLeftX);
+  const right = lowerCrossing(contour, neckRightX);
+  if (!left || !right) {
+    return null;
+  }
 
-  // 差込口X 区間でカットラインが届いている深さ。区間がカットラインの外なら
-  // 交点も頂点も無く -∞ になるため、足元まで浮いている扱い（上端=足元-最小帯）にする。
-  const deepest = deepestBoundaryInRange(contour, xL, xR);
-
-  // 縦帯が潰れて見えなくならないよう、カットライン縦幅に応じた最小高さを確保する。
-  const minBandPx = Math.max(4, (maxY - minY) * MIN_TAB_BAND_RATIO);
-  const attachY = Number.isFinite(deepest) ? deepest : footY;
-  const yPixel = Math.min(attachY, footY - minBandPx);
+  // 浅い（Y の小さい）方を首部の上端に取り、左右どちらの側でも板と確実に重なるようにする。
+  const neckTopY = Math.min(left.y, right.y);
+  // 台座上面は必ずカットライン最下端以下にあるため、首部高さは非負になる（持ち上げ量 0 で
+  // 最深部が台座上面に接する場合は 0 に潰れ得るので、負値だけを防いでおく）。
+  const neckHeight = Math.max(0, baseTopYPixel - neckTopY);
 
   return {
     centerXPixel,
-    yPixel,
-    bottomYPixel: footY,
-    widthPixel: slotWidthPixel,
     // 中心 X はピクセル座標の位置。原点 0 起点なので長さ換算と同じ乗算でよい。
     centerXMm: pixelLengthToMm(centerXPixel, mmPerPixel),
-    // 幅は与えられた実寸値をそのまま保持し、往復換算による丸め誤差を避ける。
+    baseTopYPixel,
+    neck: {
+      xPixel: neckLeftX,
+      yPixel: neckTopY,
+      widthPixel: neckWidthPixel,
+      heightPixel: neckHeight,
+    },
+    tab: {
+      xPixel: centerXPixel - slotWidthPixel / 2,
+      yPixel: baseTopYPixel,
+      widthPixel: slotWidthPixel,
+      heightPixel: tabDepthPixel,
+    },
+    // 幅・深さは与えられた実寸値をそのまま保持し、往復換算による丸め誤差を避ける。
     widthMm: slotWidthMm,
+    neckWidthMm,
+    // ツメ深さは板厚に固定（SPEC）。台座奥行はこの値を内包する大きさに取られる（base.ts）。
+    tabDepthMm: thicknessMm,
   };
 }

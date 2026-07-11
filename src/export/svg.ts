@@ -34,55 +34,64 @@ interface RectMm {
 }
 
 /**
- * 描画する 3 要素の幾何を mm 座標で束ねた中間表現。
+ * 描画する要素の幾何を mm 座標で束ねた中間表現。
  * viewBox 算出（全要素を包む境界）と SVG 文字列化の双方がこれを入力にすることで、
  * 座標変換を 1 箇所（buildGeometry）へ集約し、要素追加時の座標系ずれを防ぐ。
  */
 interface SvgGeometry {
-  /** 外形（輪郭）ポリゴンの頂点列（mm）。 */
+  /** 外形（アクリル板本体＋首部＋ツメを一体化したカットライン）の頂点列（mm）。 */
   contour: readonly Point[];
-  /** 差込口（前面図の縦帯、mm）。 */
-  slot: RectMm;
-  /** 台座（フィギュア足元へ置く実寸の footprint、mm）。 */
+  /** 差込部の首部（mm）。 */
+  neck: RectMm;
+  /** 差込部のツメ（mm）。台座上面から板厚ぶん下へ伸びる。 */
+  tab: RectMm;
+  /** 台座（台座上面へ上辺を合わせて置く実寸の footprint、mm）。 */
   base: RectMm;
 }
 
 /**
  * 解析結果を mm 座標の描画幾何へ変換する。
  *
- * 外形と差込口はプレビュー（render/overlay）と同じ前面図として mm 換算する。
+ * 外形・差込部はプレビュー（render/overlay）と同じ前面図として mm 換算する。
  * 台座は前面図に現れない奥行(depthMm)を持つため、実寸の footprint（幅×奥行）を
- * フィギュア足元（画像下端 = physicalSize.height）に上辺を合わせて下方向へ描く。
- * これにより幅・奥行の両方を実寸のまま 1 枚の図へ載せられる。
+ * **台座上面**（base.topYMm＝カットライン最下端＋持ち上げ量）に上辺を合わせて下方向へ描く。
+ * これにより幅・奥行の両方を実寸のまま 1 枚の図へ載せつつ、板本体が台座と重ならないこと・
+ * ツメ（深さ=板厚 ≦ 奥行）が台座を貫通しないことが出力形状の上でも保証される。
  */
 function buildGeometry(result: AnalysisResult): SvgGeometry {
-  const { mmPerPixel, physicalSize, contour, slot, base } = result;
+  const { mmPerPixel, contour, slot, base } = result;
 
-  // フィギュア足元＝画像下端の実寸 Y。差込口の下端・台座の上辺の基準線になる。
-  const baselineYMm = physicalSize.height;
+  // 台座上面の実寸 Y。首部の下端・ツメの上端・台座の上辺が共有する基準線。
+  const baseTopYMm = base.topYMm;
 
   const contourMm = contour.map((p) => ({ x: p.x * mmPerPixel, y: p.y * mmPerPixel }));
 
-  // 差込口（ツメ）：中心 X・幅は mm を直接使い、縦は上端 yPixel から下端 bottomYPixel
-  // （カットライン足元）までの帯（overlay と同義）。拡張後の外形と一体でカットされる。
-  const slotYMm = slot.yPixel * mmPerPixel;
-  const slotBottomYMm = slot.bottomYPixel * mmPerPixel;
-  const slotRect: RectMm = {
-    x: slot.centerXMm - slot.widthMm / 2,
-    y: slotYMm,
-    width: slot.widthMm,
-    height: Math.max(0, slotBottomYMm - slotYMm),
+  // 首部：幅は mm を直接使い、上端はカットライン下辺との接続位置（ピクセル）から換算する。
+  const neckTopYMm = slot.neck.yPixel * mmPerPixel;
+  const neckRect: RectMm = {
+    x: slot.centerXMm - slot.neckWidthMm / 2,
+    y: neckTopYMm,
+    width: slot.neckWidthMm,
+    height: Math.max(0, baseTopYMm - neckTopYMm),
   };
 
-  // 台座：差込口中心を軸に左右対称。上辺を足元に合わせ、奥行ぶん下へ伸ばす。
+  // ツメ：台座上面から板厚（＝ツメ深さ）ぶん下へ。首部より狭く、差分が肩になる。
+  const tabRect: RectMm = {
+    x: slot.centerXMm - slot.widthMm / 2,
+    y: baseTopYMm,
+    width: slot.widthMm,
+    height: slot.tabDepthMm,
+  };
+
+  // 台座：差込部中心を軸に左右対称。上辺を台座上面に合わせ、奥行ぶん下へ伸ばす。
   const baseRect: RectMm = {
     x: slot.centerXMm - base.widthMm / 2,
-    y: baselineYMm,
+    y: baseTopYMm,
     width: base.widthMm,
     height: base.depthMm,
   };
 
-  return { contour: contourMm, slot: slotRect, base: baseRect };
+  return { contour: contourMm, neck: neckRect, tab: tabRect, base: baseRect };
 }
 
 /** 全要素を包む境界（mm）に余白を足した viewBox 矩形を求める。 */
@@ -94,7 +103,7 @@ function computeViewBox(geometry: SvgGeometry): RectMm {
     xs.push(p.x);
     ys.push(p.y);
   }
-  for (const rect of [geometry.slot, geometry.base]) {
+  for (const rect of [geometry.neck, geometry.tab, geometry.base]) {
     xs.push(rect.x, rect.x + rect.width);
     ys.push(rect.y, rect.y + rect.height);
   }
@@ -134,7 +143,10 @@ export function generateSvg(result: AnalysisResult): string {
   const contourEl =
     `<path d="${closedCurvePathData(geometry.contour, fmt)}" ` +
     `fill="none" stroke="#374151" ${strokeAttr} />`;
-  const slotEl = rectElement(geometry.slot, `fill="none" stroke="#2563eb" ${strokeAttr}`);
+  // 差込部は首部・ツメの 2 矩形。どちらも外形（カットライン）に含まれるが、加工時に
+  // 差込部だと判別できるよう独立した矩形としても出力する。
+  const neckEl = rectElement(geometry.neck, `fill="none" stroke="#2563eb" ${strokeAttr}`);
+  const tabEl = rectElement(geometry.tab, `fill="none" stroke="#2563eb" ${strokeAttr}`);
   const baseEl = rectElement(geometry.base, `fill="none" stroke="#16a34a" ${strokeAttr}`);
 
   // width/height に "mm" を付け、viewBox の数値を mm と 1:1 対応させて実寸出力とする。
@@ -146,7 +158,8 @@ export function generateSvg(result: AnalysisResult): string {
     '  <title>Daiza 台座設計図（実寸 mm）</title>',
     `  <g fill="none" stroke-linejoin="round">`,
     `    ${contourEl}`,
-    `    ${slotEl}`,
+    `    ${neckEl}`,
+    `    ${tabEl}`,
     `    ${baseEl}`,
     '  </g>',
     '</svg>',

@@ -2,9 +2,10 @@
 // 各パネルを配線する。PNG 読み込み（TODO 4）・解析パイプライン（TODO 13）・
 // SVG エクスポート（TODO 15）を配線済み。
 
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 
 import { loadPngFile } from '@/analysis/imageLoader';
+import { computeMmPerPixel } from '@/analysis/scale';
 import { LeftPanel } from '@/components/LeftPanel';
 import { Preview } from '@/components/Preview';
 import { ResultPanel } from '@/components/ResultPanel';
@@ -64,6 +65,16 @@ function App() {
     [actions],
   );
 
+  // プレビューのルーラーは実寸(mm)目盛りのためスケールを要する。解析結果を待たずに
+  // フィギュア高さと画像高さだけで決まる値なので、ここで導いて渡す（解析中・失敗中でも
+  // ルーラーが消えない）。解析側と同じ computeMmPerPixel を使い、換算規則を一本化する。
+  const image = state.image;
+  const figureHeightMm = state.parameters.figureHeightMm;
+  const mmPerPixel = useMemo(
+    () => (image ? computeMmPerPixel(figureHeightMm, image.height) : null),
+    [image, figureHeightMm],
+  );
+
   // SVG エクスポート：解析結果がある時のみ有効。undefined を渡すと LeftPanel の
   // ボタンが自動で無効化されるため、結果の有無で export ハンドラを出し分ける。
   const result = state.result;
@@ -109,6 +120,7 @@ function App() {
           <Preview
             image={state.image}
             result={state.result}
+            mmPerPixel={mmPerPixel}
             status={state.status}
             onImageFile={handleImageFile}
           />

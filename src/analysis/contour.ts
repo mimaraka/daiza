@@ -20,8 +20,8 @@
 
 import polygonClipping, { type MultiPolygon, type Polygon, type Ring } from 'polygon-clipping';
 
-import { dilateMask } from '@/analysis/distance';
-import type { Contour, Point } from '@/model/types';
+import { closeMask, dilateMask } from '@/analysis/distance';
+import type { Contour, Point, SlotResult } from '@/model/types';
 import { convexHull, simplifyPolyline } from '@/utils/geometry';
 
 /**
@@ -270,9 +270,9 @@ export function extractContours(mask: Uint8Array, width: number, height: number)
 }
 
 // ---------------------------------------------------------------------------
-// カットライン生成：αマスクを「余白ぶん膨張（EDT）→ 輪郭抽出 → 残った分離パーツの
-// 最小幅ブリッジ連結 → 平滑化」して、実際に切り出すアクリル外形（カットライン）へ整える。
-// SPEC「カットライン」節の手順。
+// カットライン生成：αマスクを「余白ぶん膨張（EDT）→ 狭い隙間の充填（クロージング）→
+// 輪郭抽出 → 残った分離パーツの最小幅ブリッジ連結 → 平滑化」して、実際に切り出す
+// アクリル外形（カットライン）へ整える。SPEC「カットライン」節の手順。
 //
 // 余白オフセットは以前、間引き済みポリゴンへの素朴なミターオフセット＋ union（自己交差
 // 除去）で実装していたが、細かい凹凸（髪の毛等）を持つ 3000px 級の輪郭では自己交差が
@@ -611,10 +611,11 @@ function envelopeFromParts(parts: readonly Point[][], minBridgeWidthPx: number):
  * αマスクから最終カットラインを生成する。
  *
  * SPEC「カットライン」節の手順を実装する：(1) マスクを余白ぶん円板膨張（EDT による
- * 真のオフセット。余白以内の近接パーツはここで自動的に結合される）、(2) 膨張マスクの
- * 外周を抽出して間引き、なお分離したパーツは最小幅 minBridgeWidthPx のブリッジで連結
- * （残れば凸包で包絡）、(3) 平滑化、(4) 間引き。曲線補完（(5)）は折れ線を保ったまま
- * 描画層（overlay/SVG）が頂点列から曲線パスを起こす。以降の重心・台座計算・オーバーレイ・
+ * 真のオフセット。余白以内の近接パーツはここで自動的に結合される）、(2) 閾値 gapFillPx
+ * より狭い隙間を半径 gapFillPx/2 の円板クロージングで充填、(3) マスクの外周を抽出して
+ * 間引き、なお分離したパーツは最小幅 minBridgeWidthPx のブリッジで連結（残れば凸包で
+ * 包絡）、(4) 平滑化、(5) 間引き。曲線補完（(6)）は折れ線を保ったまま描画層
+ * （overlay/SVG）が頂点列から曲線パスを起こす。以降の重心・台座計算・オーバーレイ・
  * SVG はこの単一カットライン（が囲む領域）を外形として共有する。
  *
  * 膨張は画像枠の外（特に足元の下）へはみ出すため、返す頂点は負座標や画像寸法超の座標を
@@ -626,6 +627,7 @@ export function buildCutline(
   width: number,
   height: number,
   marginPx: number,
+  gapFillPx: number,
   smoothing: number,
   minBridgeWidthPx: number,
 ): Contour {
@@ -633,14 +635,23 @@ export function buildCutline(
   // 自己交差正規化は不要になる。
   const dilated = dilateMask(mask, width, height, marginPx);
 
-  // 膨張マスクの外周を抽出 → 画素段差を間引き → 膨張グリッドの原点ずれを元画像座標へ戻す。
-  const rings = extractContours(dilated.mask, dilated.width, dilated.height)
+  // 隙間埋め：閾値は「最終的なカットライン間の隙間」なので、余白を反映した後のマスクに
+  // 対して測る（SPEC「パイプライン上の位置・整合」）。半径 r = 閾値/2 の円板クロージング
+  // は幅 2r 未満の隙間だけを、円弧でなめらかに埋める。閾値 0（無効）なら素通し。
+  const closed = closeMask(dilated.mask, dilated.width, dilated.height, gapFillPx / 2);
+
+  // 2 段のグリッド拡張（膨張＋クロージング）を合成した、元画像座標への原点ずれ。
+  const offsetX = dilated.offsetX + closed.offsetX;
+  const offsetY = dilated.offsetY + closed.offsetY;
+
+  // 充填後マスクの外周を抽出 → 画素段差を間引き → グリッドの原点ずれを元画像座標へ戻す。
+  // クロージングで結合したパーツはここで 1 リングとして現れ、以降のブリッジ連結・凸包
+  // 退避の対象から自動的に外れる。
+  const rings = extractContours(closed.mask, closed.width, closed.height)
     .map((c) => simplifyPolyline(c, TRACE_SIMPLIFY_EPSILON_PX))
     .filter((c) => c.length >= 3)
     .map((c) =>
-      dilated.offsetX === 0 && dilated.offsetY === 0
-        ? c
-        : c.map((p) => ({ x: p.x + dilated.offsetX, y: p.y + dilated.offsetY })),
+      offsetX === 0 && offsetY === 0 ? c : c.map((p) => ({ x: p.x + offsetX, y: p.y + offsetY })),
     );
 
   if (rings.length === 0) {
@@ -655,12 +666,11 @@ export function buildCutline(
 }
 
 // ---------------------------------------------------------------------------
-// ツメ（差込口）一体化：差込口位置がカットラインの足元から離れている場合に、
-// ツメ（差込口幅ぶんの矩形）ぶんカットラインを下方向へ拡張して一体の外形にする。
-// SPEC「ツメとカットラインの一体化」節に対応する。
+// 差込部（首部＋ツメ）の一体化：カットラインの下辺を、首部・ツメを含む形へ下方向へ
+// 拡張して 1 枚の外形にする。SPEC「カットラインとの一体化」節に対応する。
 
 /** 垂直線 x との交差のうち最も下（Y 最大）の下辺クロッシング。 */
-interface LowerCrossing {
+export interface LowerCrossing {
   /** 交点の Y。 */
   y: number;
   /** 交差した辺のインデックス（辺 i = 頂点 i → i+1）。 */
@@ -670,8 +680,12 @@ interface LowerCrossing {
 /**
  * 閉ポリゴンと垂直線 x=lineX の交差のうち、最も下（Y 最大）＝外側下辺の交点を返す。
  * 半開区間で straddle 判定し、共有頂点での二重計上を避ける。交差が無ければ null。
+ *
+ * 差込部の接続位置（首部が板本体と重なる高さ）を決める共通の基準でもあるため、
+ * analysis/slot からも参照できるよう公開する（両者が同じ交点を見ることで、
+ * 描画上の首部矩形と実際に拡張されるカットラインがずれない）。
  */
-function lowerCrossing(contour: readonly Point[], lineX: number): LowerCrossing | null {
+export function lowerCrossing(contour: readonly Point[], lineX: number): LowerCrossing | null {
   const n = contour.length;
   let best: LowerCrossing | null = null;
   for (let i = 0; i < n; i++) {
@@ -713,53 +727,72 @@ function averageY(contour: readonly Point[], from: number, to: number): number {
 }
 
 /**
- * ツメをカットラインへ一体化する。
+ * 差込部（首部＋ツメ）をカットラインへ一体化する。
  *
- * X 区間 [xL, xR] の下辺を足元（footY）まで落とした矩形状のツメへ置き換えた新しい
- * カットラインを返す。既にこの区間でカットラインが footY 付近まで届いている場合、または
- * 区間端の下辺クロッシングが取れない（区間がカットライン外）場合は拡張不要としてそのまま返す。
+ * 首部の X 区間の下辺を、首部・肩・ツメを描く外周へ置き換えた新しいカットラインを返す。
+ * アクリル板本体・首部・ツメが常に 1 枚として切り出されるようにするための拡張であり、
+ * 拡張後の形状がオーバーレイ・SVG エクスポートの外形になる（SPEC「カットラインとの一体化」）。
  *
- * 手順：区間端の垂直線 x=xL・x=xR とカットライン下辺の交点 PL・PR を求め、その 2 点の
- * 間にある「下辺の弧」（弧内頂点の平均 Y が大きい側）をツメ矩形の外周
- * （PL→(xL,footY)→(xR,footY)→PR）で置き換える。区間内は元々アクリル本体の下端なので、
- * 下辺だけを下げるこの置換は自己交差を生まない（複雑な凹形状での厳密な union は T19-6 で対応）。
+ * 手順：首部の左右端の垂直線とカットライン下辺の交点 PL・PR を求め、その 2 点の間にある
+ * 「下辺の弧」（弧内頂点の平均 Y が大きい側）を、以下の外周で置き換える。
+ *
+ *   PL →(首部左側面)→ 台座上面 →(左の肩)→ ツメ左 →(ツメ底)→ ツメ右 →(右の肩)→ 台座上面 →(首部右側面)→ PR
+ *
+ * 台座上面より下へ出るのはツメだけで、板本体は台座に潜り込まない。区間内は元々アクリル
+ * 本体の下端なので、下辺だけを下げるこの置換は自己交差を生まない。
+ *
+ * 首部端の下辺交点が取れない（差込部が板の外にある）場合は拡張できないためそのまま返す
+ * ——ただし analysis/slot.findSlot が同じ交点を検査して配置不可としているため、正常系では
+ * 到達しない防御的分岐である。
  */
-export function attachSlotTab(contour: Contour, xL: number, xR: number, footY: number): Contour {
+export function attachSlotBody(contour: Contour, slot: SlotResult): Contour {
   const n = contour.length;
-  if (n < 3 || !(xL < xR) || !Number.isFinite(footY)) {
+  const neckLeftX = slot.neck.xPixel;
+  const neckRightX = slot.neck.xPixel + slot.neck.widthPixel;
+  const tabLeftX = slot.tab.xPixel;
+  const tabRightX = slot.tab.xPixel + slot.tab.widthPixel;
+  const baseTopY = slot.baseTopYPixel;
+  const tabBottomY = slot.tab.yPixel + slot.tab.heightPixel;
+
+  if (
+    n < 3 ||
+    !(neckLeftX < neckRightX) ||
+    !(tabLeftX < tabRightX) ||
+    !Number.isFinite(baseTopY) ||
+    !Number.isFinite(tabBottomY)
+  ) {
     return contour.slice();
   }
 
-  const cl = lowerCrossing(contour, xL);
-  const cr = lowerCrossing(contour, xR);
+  const cl = lowerCrossing(contour, neckLeftX);
+  const cr = lowerCrossing(contour, neckRightX);
   if (!cl || !cr) {
-    return contour.slice();
-  }
-
-  // 区間内で最も深い下辺位置。足元まで届いていれば（差が微小）拡張不要。
-  let deepest = Math.max(cl.y, cr.y);
-  for (const p of contour) {
-    if (p.x >= xL && p.x <= xR && p.y > deepest) deepest = p.y;
-  }
-  if (footY - deepest <= 1e-6) {
     return contour.slice();
   }
 
   const iL = cl.edge;
   const iR = cr.edge;
-  const PL: Point = { x: xL, y: cl.y };
-  const PR: Point = { x: xR, y: cr.y };
-  const tabL: Point = { x: xL, y: footY };
-  const tabR: Point = { x: xR, y: footY };
+
+  // 差込部の外周を左→右向きに並べたもの。逆向きに差し込む場合は反転して使う。
+  const bodyLeftToRight: Point[] = [
+    { x: neckLeftX, y: cl.y },
+    { x: neckLeftX, y: baseTopY },
+    { x: tabLeftX, y: baseTopY },
+    { x: tabLeftX, y: tabBottomY },
+    { x: tabRightX, y: tabBottomY },
+    { x: tabRightX, y: baseTopY },
+    { x: neckRightX, y: baseTopY },
+    { x: neckRightX, y: cr.y },
+  ];
+  const bodyRightToLeft: Point[] = [...bodyLeftToRight].reverse();
 
   // 同一辺が両端の垂直線をまたぐ（下辺が 1 本の長い辺）場合は、その辺の途中に
-  // ツメを差し込む。辺の向き（左→右／右→左）に沿って PL・PR の順序を決める。
+  // 差込部を差し込む。辺の向き（左→右／右→左）に沿って外周の順序を決める。
   if (iL === iR) {
     const a = contour[iL];
     const b = contour[(iL + 1) % n];
     if (!a || !b) return contour.slice();
-    const leftToRight = a.x <= b.x;
-    const insert = leftToRight ? [PL, tabL, tabR, PR] : [PR, tabR, tabL, PL];
+    const insert = a.x <= b.x ? bodyLeftToRight : bodyRightToLeft;
     const out: Point[] = [];
     for (let i = 0; i < n; i++) {
       const p = contour[i];
@@ -769,14 +802,14 @@ export function attachSlotTab(contour: Contour, xL: number, xR: number, footY: n
     return out;
   }
 
-  // 2 本の弧のうち、下辺（平均 Y が大きい側）をツメ矩形で置き換える。
+  // 2 本の弧のうち、下辺（平均 Y が大きい側）を差込部の外周で置き換える。
   const forwardInteriorAvg = averageY(contour, (iL + 1) % n, iR);
   const otherInteriorAvg = averageY(contour, (iR + 1) % n, iL);
 
   if (forwardInteriorAvg >= otherInteriorAvg) {
-    // 前方向の弧（PL→…→PR）が下辺。ツメ＋反対側（上辺）の弧で再構成する。
-    return [PL, tabL, tabR, PR, ...collectForward(contour, (iR + 1) % n, iL)];
+    // 前方向の弧（PL→…→PR）が下辺。差込部＋反対側（上辺）の弧で再構成する。
+    return [...bodyLeftToRight, ...collectForward(contour, (iR + 1) % n, iL)];
   }
   // 反対側の弧（PR→…→PL）が下辺。
-  return [PR, tabR, tabL, PL, ...collectForward(contour, (iL + 1) % n, iR)];
+  return [...bodyRightToLeft, ...collectForward(contour, (iL + 1) % n, iR)];
 }
