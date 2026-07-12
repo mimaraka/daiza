@@ -278,6 +278,11 @@ export interface AnalysisResult {
   physicalSize: Size;
   /** スケール換算係数（mm/px）。 */
   mmPerPixel: number;
+  /**
+   * 絵柄画像の実効解像度(DPI)＝ 25.4 / mmPerPixel。実寸に対して画素密度が足りているか
+   * （印刷に耐えるか）の判断材料として表示する。
+   */
+  dpi: number;
   /** 外形（輪郭）ポリゴン。 */
   contour: Contour;
   centroid: Centroid;

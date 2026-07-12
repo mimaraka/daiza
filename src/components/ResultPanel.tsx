@@ -41,6 +41,9 @@ function buildRows(result: AnalysisResult | null): ResultRow[] {
         ? `${result.physicalSize.width.toFixed(1)} × ${result.physicalSize.height.toFixed(1)} mm`
         : PLACEHOLDER,
     },
+    // 絵柄の画素密度。実寸（＝フィギュア高さ指定）に対して画像の解像度が足りているかを
+    // 印刷業界で馴染みのある単位で示す。小数は判断に寄与しないため整数で丸める。
+    { label: '画像解像度', value: num(result?.dpi, 'dpi', 0) },
     {
       label: '重心座標',
       value: result

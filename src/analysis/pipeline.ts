@@ -32,7 +32,7 @@ import {
   unionSlotRects,
 } from '@/analysis/contour';
 import type { DilatedMask } from '@/analysis/distance';
-import { computeMmPerPixel, computePhysicalSize } from '@/analysis/scale';
+import { computeDpi, computeMmPerPixel, computePhysicalSize } from '@/analysis/scale';
 import { findSlot } from '@/analysis/slot';
 import { computeStability } from '@/analysis/stability';
 import type {
@@ -459,6 +459,7 @@ export function runAnalysis(
       imageSize,
       physicalSize: computePhysicalSize(imageSize, mmPerPixel),
       mmPerPixel,
+      dpi: computeDpi(mmPerPixel),
       contour: finalContour,
       centroid,
       slot,

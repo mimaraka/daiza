@@ -55,6 +55,21 @@ export function computeMmPerPixel(params: ScaleParameters, figureHeightPixels: n
   return artworkHeightMm / figureHeightPixels;
 }
 
+/** 1 インチ = 25.4 mm（DPI 換算の定義値）。 */
+const MM_PER_INCH = 25.4;
+
+/**
+ * 絵柄画像の実効解像度(DPI)を求める。
+ *
+ * mm/px は「画像 1px が実寸で何 mm になるか」なので、その逆数（px/mm）へ 25.4 を掛けると
+ * 1 インチあたりの画素数、すなわち印刷時の解像度になる。フィギュア高さ(mm)を変えると
+ * 同じ PNG でも実寸が伸縮するため、DPI は入力画像固有の値ではなく**解析結果**である
+ * （印刷に耐える画素密度か＝画像の解像度が足りているかの判断材料になる）。
+ */
+export function computeDpi(mmPerPixel: number): number {
+  return MM_PER_INCH / mmPerPixel;
+}
+
 /** ピクセル長を実寸(mm)へ換算する。 */
 export function pixelLengthToMm(lengthPixel: number, mmPerPixel: number): number {
   return lengthPixel * mmPerPixel;
