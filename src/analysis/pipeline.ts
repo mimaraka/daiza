@@ -3,12 +3,15 @@
 // パフォーマンス要件（SPEC「オーバーレイのみの更新で済む場合は画像解析全体を再実行
 // しない」）のため、パイプラインを 2 相に分ける：
 //
-//   analyzeImage … 画像だけに依存する前処理（α マスク構築・絵柄の高さ測定）。
-//                  O(W×H)。画像が変わった時だけ実行し、マスクを画像不変量として保持する。
-//   runAnalysis  … パラメータに依存する計算（カットライン・重心・差込口・台座・転倒角）。
-//                  パラメータ変更ごとに呼ばれる。このうちカットライン生成（EDT 膨張＋
-//                  隙間埋め＋輪郭抽出）だけは O(W×H) と重いため、依存パラメータを鍵に
-//                  段ごとメモ化し、台座幅等の無関係な変更では再計算しない。
+//   analyzeImage … 画像だけに依存する前処理（α プレーン抽出）。O(W×H)。画像が変わった
+//                  時だけ実行し、α 値そのものを画像不変量として保持する。
+//   runAnalysis  … パラメータに依存する計算（二値化・カットライン・重心・差込口・台座・
+//                  転倒角）。パラメータ変更ごとに呼ばれる。このうち二値化とカットライン
+//                  生成（EDT 膨張＋隙間埋め＋輪郭抽出）は O(W×H) と重いため、依存パラメータ
+//                  を鍵に段ごとメモ化し、台座幅等の無関係な変更では再計算しない。
+//
+// 不透明判定のしきい値（alphaThreshold）がユーザーパラメータであるため、二値マスクは
+// 画像不変量ではない。第 1 相は α 値のプレーンまでを担い、二値化は第 2 相が行う。
 //
 // 3000px 級のフリーズ対策として、両相とも hooks/useAnalysis が Web Worker 上で駆動する
 // （カットライン生成は「軽量な第 2 相」の例外で、実測でメインスレッドを塞ぐ重さがある
@@ -42,7 +45,13 @@ import type {
   Size,
   SlotResult,
 } from '@/model/types';
-import { buildAlphaMask, opaqueRowRange } from '@/utils/image';
+import {
+  extractAlphaPlane,
+  isAcrylicAlpha,
+  MIN_ALPHA_THRESHOLD,
+  opaqueRowRange,
+  thresholdAlphaPlane,
+} from '@/utils/image';
 
 /**
  * パイプライン段で発生し得るエラー種別。
@@ -57,7 +66,7 @@ type PipelineErrorKind = Extract<
 /** UI へ提示するエラーメッセージ（日本語）。 */
 const ERROR_MESSAGES: Record<PipelineErrorKind, string> = {
   transparentImage:
-    'アクリル領域（α>0）が見つからないため解析できません。透明でないPNG画像を選択してください。',
+    'アクリル領域が見つからないため解析できません。アルファ閾値を下げる、または透明でないPNG画像を選択してください。',
   scaleCalculationFailed:
     'フィギュア高さが小さすぎます。フィギュア高さは「接地面（台座底面）からカットライン（絵柄＋余白）の上端まで」の全高です。カットライン余白×2＋アクリル板の持ち上げ量＋板厚 より大きい値を指定してください。',
   slotPlacementFailed:
@@ -76,18 +85,36 @@ export type AnalysisOutcome =
  * （Worker／フォールバック時の useAnalysis）が画像単位でメモ化し、パラメータ変更時は
  * runAnalysis の入力として使い回す。
  *
- * マスクは 1 バイト/画素（3000px 級で約 9MB）と大きいため、Worker 実行時は Worker 内に
- * 留め、メインスレッドへ構造化クローンで送らないこと（hooks/useAnalysis 参照）。
+ * 保持するのは二値マスクではなく **α 値そのもの**である：不透明判定のしきい値
+ * （alphaThreshold）はユーザーパラメータであり、二値マスクはしきい値に依存するため
+ * 画像不変量にならない。α プレーンなら 1 バイト/画素（3000px 級で約 9MB）で、しきい値
+ * 変更時も RGBA（36MB）を抱え直さずに二値化し直せる。この大きさゆえ Worker 実行時は
+ * Worker 内に留め、メインスレッドへ構造化クローンで送らないこと（hooks/useAnalysis 参照）。
  *
- * 重心・外形はカットライン（余白・平滑化パラメータ依存）に対して求めるため、この相では
- * 確定できない。カットライン化（EDT 膨張・輪郭抽出）と重心計算は第 2 相（runAnalysis）が担う。
+ * 重心・外形はカットライン（しきい値・余白・平滑化パラメータ依存）に対して求めるため、
+ * この相では確定できない。二値化・カットライン化（EDT 膨張・輪郭抽出）・重心計算は
+ * 第 2 相（runAnalysis）が担う。
  */
 export interface ImageAnalysis {
-  /** 不透明領域（α>0）を 1 とする 1 バイト/画素のマスク。カットライン膨張の入力。 */
-  mask: Uint8Array;
-  /** マスクのピクセル寸法。 */
+  /** α チャンネルのみを抜き出した 1 バイト/画素のプレーン。二値化（第 2 相）の入力。 */
+  alpha: Uint8Array;
+  /** プレーンのピクセル寸法。 */
   width: number;
   height: number;
+}
+
+/** 第 1 相の成否。成功なら画像不変量、失敗なら型付きエラー（透明画像）。 */
+export type ImageAnalysisOutcome =
+  { ok: true; value: ImageAnalysis } | { ok: false; error: AnalysisError };
+
+/**
+ * しきい値で二値化した画像（第 2 相の最初の段）。
+ * マスクとその行範囲から求まる絵柄の高さは、どちらも「どの α をアクリルとみなすか」に
+ * 依存するため、しきい値を鍵に一体でメモ化する（CutlineMemo）。
+ */
+interface BinaryImage {
+  /** アクリル画素を 1 とする 1 バイト/画素のマスク。カットライン膨張の入力。 */
+  mask: Uint8Array;
   /**
    * 絵柄（不透明領域）の上端〜下端の点間距離(px)。スケール(mm/px)の基準。
    * 画像高さではなくこの値を使うことで、PNG の透明余白の量でフィギュアの実寸が
@@ -95,10 +122,6 @@ export interface ImageAnalysis {
    */
   figureHeightPixels: number;
 }
-
-/** 第 1 相の成否。成功なら画像不変量、失敗なら型付きエラー（透明画像）。 */
-export type ImageAnalysisOutcome =
-  { ok: true; value: ImageAnalysis } | { ok: false; error: AnalysisError };
 
 /**
  * 第 1 相が必要とする画像データの最小形。
@@ -124,49 +147,47 @@ function fail(kind: PipelineErrorKind): AnalysisOutcome {
 }
 
 /**
- * 第 1 相：画像から不透明領域の α マスクを構築し、絵柄の高さ(px)を測る。
+ * 第 1 相：RGBA から α プレーンを抜き出す。
  *
- * α 判定の全画素走査を 1 回にまとめ、以降の相（カットライン膨張・輪郭抽出）はこの
- * 1 バイト/画素マスクだけを参照する。この相はパラメータに依存しないため、画像が
- * 変わった時だけ実行すれば足りる。輪郭抽出はカットライン（余白パラメータ依存）の
- * 膨張マスクに対して第 2 相が行うので、ここでは行わない。
+ * RGBA の全画素走査をこの 1 回にまとめ、以降の相（二値化・カットライン膨張・輪郭抽出）は
+ * 1 バイト/画素のプレーンだけを参照する。しきい値（alphaThreshold）に依存しないため、
+ * この相は画像が変わった時だけ実行すれば足り、しきい値の変更では再実行されない。
  *
- * α>0 が皆無なら透明画像として型付きエラーを返す。本来 imageLoader が読み込み段階で
- * 弾くが、防御的に検査する。
+ * 不透明とみなせる画素が 1 つも無ければ（α が全画素 0）透明画像として型付きエラーを返す。
+ * 本来 imageLoader が読み込み段階で弾くが、防御的に検査する。しきい値を上げた結果として
+ * 不透明領域が消えるケースはしきい値依存なので、第 2 相（binarize）が同じ種別で弾く。
  */
 export function analyzeImage(image: ImagePixels): ImageAnalysisOutcome {
   const { imageData, width, height } = image;
 
-  // α マスク：カットライン膨張・輪郭抽出の画像不変な前処理。1 回だけ構築する。
-  const mask = buildAlphaMask(imageData);
+  // α プレーン：二値化・カットライン生成の画像不変な前処理。1 回だけ構築する。
+  const alpha = extractAlphaPlane(imageData);
 
-  // 絵柄の上端・下端。スケールの基準であり、同時に「アクリル領域が無い（全透明）」の
-  // 検査でもある（無ければ差込口・台座・転倒角の基準が取れないため弾く）。
-  const rows = opaqueRowRange(mask, width, height);
-  if (!rows) {
+  // 完全透明（α が全画素 0）の検査。RGBA ではなく抽出済みプレーンを見れば足りる。
+  if (!alpha.some((value) => isAcrylicAlpha(value, MIN_ALPHA_THRESHOLD))) {
     return { ok: false, error: makeError('transparentImage') };
   }
 
-  // 上端・下端の「点間距離」（画素数 −1）。カットライン・台座・ルーラーが同じ点座標系で
-  // 位置を測るため、こちらを基準にするとルーラーの読みとフィギュア高さが一致する。
-  // 1 行しか無い退化画像でもゼロ除算しないよう下限 1 を置く。
-  const figureHeightPixels = Math.max(1, rows.maxY - rows.minY);
-
-  return { ok: true, value: { mask, width, height, figureHeightPixels } };
+  return { ok: true, value: { alpha, width, height } };
 }
 
 /**
  * カットラインのメモ。runAnalysis の入力パラメータのうち各段に影響するものが変わらない
- * 限り、O(W×H) の膨張・隙間埋め・輪郭抽出を再実行しないための可変ホルダ。
+ * 限り、O(W×H) の二値化・膨張・隙間埋め・輪郭抽出を再実行しないための可変ホルダ。
  *
- * 段は 3 つ：膨張マスク（スケール・余白に依存）／カットライン（＋隙間埋め・平滑化・連結幅）／
- * 差込部を合流させたカットライン（＋差込部の配置）。上流の段ほど変わりにくく重いため、
- * それぞれ独立した鍵で保持する（台座幅だけの変更ではどの段も再計算されない）。
+ * 段は 4 つ：二値化（α しきい値に依存）／膨張マスク（＋スケール・余白）／カットライン
+ * （＋隙間埋め・平滑化・連結幅）／差込部を合流させたカットライン（＋差込部の配置）。
+ * 上流の段ほど変わりにくく重いため、それぞれ独立した鍵で保持する（台座幅だけの変更では
+ * どの段も再計算されない）。
  *
  * 呼び出し側が「同じ画像の連続した解析」の単位で 1 つ保持する（画像が変われば
  * 新しいメモに取り替える）。Worker 実行時は Worker 内の第 1 相キャッシュに同居させる。
  */
 export interface CutlineMemo {
+  /** 二値化に使った α しきい値。未計算なら null。 */
+  binaryKey: number | null;
+  /** 二値化の結果。しきい値が高すぎて不透明画素が消えた場合は null（失敗も含めてメモする）。 */
+  binary: BinaryImage | null;
   maskKey: string | null;
   mask: DilatedMask | null;
   contourKey: string | null;
@@ -178,6 +199,8 @@ export interface CutlineMemo {
 /** 空のカットラインメモを作る。 */
 export function createCutlineMemo(): CutlineMemo {
   return {
+    binaryKey: null,
+    binary: null,
     maskKey: null,
     mask: null,
     contourKey: null,
@@ -189,10 +212,47 @@ export function createCutlineMemo(): CutlineMemo {
 
 /**
  * 膨張マスクが依存する値だけから成るメモ鍵。
- * 余白の実効ピクセル値は 余白(mm) / mmPerPixel なので、この 2 つで一意に決まる。
+ * 入力の二値マスク（α しきい値に依存）と、余白の実効ピクセル値（余白(mm) / mmPerPixel）で
+ * 一意に決まる。しきい値が変わっても絵柄の高さ(px)が偶然変わらないことはあり得るため、
+ * mmPerPixel だけに頼らずしきい値も鍵に含める。
  */
 function maskKeyOf(params: AnalysisParameters, mmPerPixel: number): string {
-  return [mmPerPixel, params.cutLineMarginMm].join('/');
+  return [params.alphaThreshold, mmPerPixel, params.cutLineMarginMm].join('/');
+}
+
+/**
+ * α プレーンをしきい値で二値化し、絵柄の高さ(px)を測る（第 2 相の最初の段、O(W×H)）。
+ * 不透明画素が 1 つも残らなければ null（＝しきい値が高すぎる）。
+ *
+ * しきい値だけを鍵にメモ化する。台座幅のような無関係なパラメータの変更では再計算されず、
+ * 「しきい値が高すぎて解析不能」という失敗も含めてメモするため、その状態で他のパラメータを
+ * 動かしても走査は繰り返さない。
+ */
+function binarize(
+  imageAnalysis: ImageAnalysis,
+  threshold: number,
+  memo?: CutlineMemo,
+): BinaryImage | null {
+  if (memo && memo.binaryKey === threshold) {
+    return memo.binary;
+  }
+
+  const { alpha, width, height } = imageAnalysis;
+  const mask = thresholdAlphaPlane(alpha, threshold);
+
+  // 絵柄の上端・下端。スケールの基準であり、同時に「アクリル領域が無い」の検査でもある
+  // （無ければ差込口・台座・転倒角の基準が取れないため弾く）。
+  const rows = opaqueRowRange(mask, width, height);
+  // 上端・下端の「点間距離」（画素数 −1）。カットライン・台座・ルーラーが同じ点座標系で
+  // 位置を測るため、こちらを基準にするとルーラーの読みとフィギュア高さが一致する。
+  // 1 行しか無い退化画像でもゼロ除算しないよう下限 1 を置く。
+  const binary = rows ? { mask, figureHeightPixels: Math.max(1, rows.maxY - rows.minY) } : null;
+
+  if (memo) {
+    memo.binaryKey = threshold;
+    memo.binary = binary;
+  }
+  return binary;
 }
 
 /** カットライン（差込部を含まない）が依存するパラメータだけから成るメモ鍵。 */
@@ -273,14 +333,16 @@ function buildSlottedCutline(
 /**
  * 第 2 相：画像不変量（analyzeImage の結果）とパラメータから解析結果一式を求める。
  *
- * スケール（mm/px）をまず確定し、以降の幾何はすべてピクセル座標で計算して結果の
- * 段で mm へ換算する。各ステップの null は「その段で計算不能」を意味し、意味の近い
- * エラー種別へ写して早期に返す。全段を通れば AnalysisResult を組み立てて返す。
+ * α プレーンをしきい値で二値化して不透明領域を確定し、スケール（mm/px）を求め、以降の
+ * 幾何はすべてピクセル座標で計算して結果の段で mm へ換算する。各ステップの null は
+ * 「その段で計算不能」を意味し、意味の近いエラー種別へ写して早期に返す。全段を通れば
+ * AnalysisResult を組み立てて返す。
  *
- * 重いのはカットライン生成（EDT 膨張＋隙間埋め＋輪郭抽出、O(W×H)）で、隙間埋めが有効な
- * ときは差込部を合流させた 2 回目の生成も走る。cutlineMemo を渡せば、膨張マスク／
- * カットライン／差込部込みカットラインの各段が、それぞれの依存パラメータが同じ間は
- * 再利用される。それ以外（重心・差込口・台座・転倒角）は頂点数に比例する軽量計算のみ。
+ * 重いのは二値化（O(W×H)）とカットライン生成（EDT 膨張＋隙間埋め＋輪郭抽出、O(W×H)）で、
+ * 隙間埋めが有効なときは差込部を合流させた 2 回目の生成も走る。cutlineMemo を渡せば、
+ * 二値化／膨張マスク／カットライン／差込部込みカットラインの各段が、それぞれの依存
+ * パラメータが同じ間は再利用される。それ以外（重心・差込口・台座・転倒角）は頂点数に
+ * 比例する軽量計算のみ。
  *
  * image は寸法だけを使うため、Worker 側は ImageData を持たない {width, height} でも呼べる。
  */
@@ -292,23 +354,30 @@ export function runAnalysis(
 ): AnalysisOutcome {
   const { width, height } = image;
 
+  // 不透明領域の確定。しきい値が高すぎてアクリル画素が 1 つも残らなければ、以降の基準
+  // （絵柄の高さ・重心・差込口）が取れないため透明画像と同じ扱いで弾く。
+  const binary = binarize(imageAnalysis, params.alphaThreshold, cutlineMemo);
+  if (!binary) {
+    return fail('transparentImage');
+  }
+
   // スケールは「フィギュア高さ（接地面〜カットライン上端の全高）から絵柄の外側の高さを
   // 引いた絵柄の高さ(mm)」を「絵柄の高さ(px)」で割って得る。フィギュア高さが絵柄の外側の
   // 高さ（余白×2＋持ち上げ量＋板厚）以下だと絵柄が存在できないため、計算不能として弾く。
-  const mmPerPixel = computeMmPerPixel(params, imageAnalysis.figureHeightPixels);
+  const mmPerPixel = computeMmPerPixel(params, binary.figureHeightPixels);
   if (!Number.isFinite(mmPerPixel) || mmPerPixel <= 0) {
     return fail('scaleCalculationFailed');
   }
 
-  // α マスクを余白ぶん膨張したマスク。カットライン生成で最も重い段（O(W×H)）であり、
-  // 差込部を合流させた 2 回目の生成でも使い回すため、スケール・余白を鍵にメモ化する。
+  // 二値マスクを余白ぶん膨張したマスク。カットライン生成で最も重い段（O(W×H)）であり、
+  // 差込部を合流させた 2 回目の生成でも使い回すため、しきい値・スケール・余白を鍵にメモ化する。
   const maskKey = maskKeyOf(params, mmPerPixel);
   let dilated: DilatedMask;
   if (cutlineMemo && cutlineMemo.maskKey === maskKey && cutlineMemo.mask) {
     dilated = cutlineMemo.mask;
   } else {
     dilated = buildCutlineMask(
-      imageAnalysis.mask,
+      binary.mask,
       imageAnalysis.width,
       imageAnalysis.height,
       params.cutLineMarginMm / mmPerPixel,

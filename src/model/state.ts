@@ -25,6 +25,8 @@ export interface AppState {
 
 /** パラメータの既定値。SPEC の例（高さ160 / 板厚3 等）に準拠。 */
 export const DEFAULT_PARAMETERS: AnalysisParameters = {
+  // 既定は SPEC の「α=0 を透明・α>0 をアクリル」と等価（しきい値より大きい α を不透明とする）。
+  alphaThreshold: 0,
   figureHeightMm: 160,
   thicknessMm: 3,
   // 余白は SPEC 既定の 3mm。平滑化は「最小（無効）」から始め、UI で強められるようにする。
@@ -83,6 +85,9 @@ export function normalizeParameters(params: AnalysisParameters): AnalysisParamet
  * min/max/step を一元管理し、UI と検証のズレを防ぐ。
  */
 export const PARAMETER_CONSTRAINTS = {
+  // 不透明度の割合。判定が「> しきい値」のため 1 では全画素が透明になり解析できないので、
+  // 1 段（0.01 = α 2.55 相当）手前を上限に取る。
+  alphaThreshold: { min: 0, max: 0.99, step: 0.01 },
   figureHeightMm: { min: 1, max: 2000, step: 1 },
   thicknessMm: { min: 0.1, max: 20, step: 0.1 },
   cutLineMarginMm: { min: 0, max: 10, step: 0.5 },

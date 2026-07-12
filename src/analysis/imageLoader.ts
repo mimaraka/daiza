@@ -11,7 +11,7 @@
 
 import { depositPixels } from '@/model/pixelStore';
 import type { AnalysisError, AnalysisErrorKind, FigureImage } from '@/model/types';
-import { hasVisiblePixels } from '@/utils/image';
+import { hasVisiblePixels, MIN_ALPHA_THRESHOLD } from '@/utils/image';
 
 /** imageLoader が返し得るエラー種別。 */
 type ImageLoadErrorKind = Extract<
@@ -106,7 +106,10 @@ export async function loadPngFile(file: File): Promise<ImageLoadResult> {
     return fail('imageLoadFailed');
   }
 
-  if (!hasVisiblePixels(imageData)) {
+  // 読み込み段階で弾くのは「α が全画素 0」の完全透明 PNG だけ。ユーザーが指定する
+  // アルファ閾値（AnalysisParameters.alphaThreshold）はここでは未知であり、しきい値を
+  // 上げた結果として不透明領域が消えるケースは解析側（analysis/pipeline）がエラーにする。
+  if (!hasVisiblePixels(imageData, MIN_ALPHA_THRESHOLD)) {
     bitmap.close();
     return fail('transparentImage');
   }
