@@ -174,6 +174,7 @@ function PresetNumberField({
 
 export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftPanelProps) {
   const smoothing = PARAMETER_CONSTRAINTS.cutLineSmoothing;
+  const alphaThreshold = PARAMETER_CONSTRAINTS.alphaThreshold;
   // 首部幅の下限は差込口幅に連動する（肩が消えないための不変条件）。入力側でも下限を
   // 差込口幅へ追従させ、そもそも制約を割る値を入れられないようにする（状態側の
   // normalizeParameters が最終的な番人）。
@@ -224,6 +225,31 @@ export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftP
           <CardTitle>パラメータ</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4">
+          {/* 不透明領域の判定そのものを決める最上流のパラメータなので先頭に置く。 */}
+          <div className="grid gap-1.5">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="alpha-threshold">アルファ閾値</Label>
+              {/* 0=既定（α>0 をすべて不透明）を明示するため現在値を併記する。 */}
+              <span className="text-muted-foreground text-sm tabular-nums">
+                {parameters.alphaThreshold.toFixed(2)}
+              </span>
+            </div>
+            <Slider
+              id="alpha-threshold"
+              min={alphaThreshold.min}
+              max={alphaThreshold.max}
+              step={alphaThreshold.step}
+              value={[parameters.alphaThreshold]}
+              onValueChange={([next]) => {
+                if (next !== undefined) {
+                  // スライダーの内部計算で 0.30000000000000004 のような値が出るため、
+                  // step の桁（0.01）へ丸めてから状態・解析メモの鍵に載せる。
+                  onParametersChange({ alphaThreshold: Math.round(next * 100) / 100 });
+                }
+              }}
+            />
+          </div>
+
           <NumberField
             id="figure-height"
             label="フィギュア高さ"
