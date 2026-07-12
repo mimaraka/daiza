@@ -53,10 +53,32 @@ function lerp(a: Point, b: Point, t: number): Point {
 }
 
 /**
+ * コーナー弧のハンドル長（丸め半径 r に対する比率）。両辺に接する円弧を 3 次ベジェで近似する値。
+ *
+ * 制御点を頂点 V にそのまま置く（比率 1.0）とハンドルが長すぎ、曲線が V へ強く引き寄せられて
+ * 角が尖った（折れ線に張り付いた）見た目になる。円弧近似の定石どおり、頂点の内角 θ から
+ * ハンドル長を決める：弧の中心角 φ = π − θ、半径 R = r·tan(θ/2) の円弧に対する 3 次ベジェの
+ * ハンドル長は (4/3)·tan(φ/4)·R で、r で割って整理すると
+ *
+ *   k = (4/3) · sin(θ/2) / (1 + sin(θ/2))
+ *
+ * となる（tan の発散を含まないので θ→π でも数値的に安定）。直角コーナー θ=π/2 では
+ * k ≈ 0.552（円の 4 分割ベジェ近似の定数と一致）、ほぼ直線 θ→π では 2/3、鋭いスパイク θ→0
+ * では 0 に収束し、角が鋭いほど自動的にハンドルが短くなる。
+ */
+function cornerHandleRatio(cosTheta: number): number {
+  // 半角公式 sin(θ/2) = √((1 − cos θ)/2)。丸め誤差で定義域外へ出ないようクランプする。
+  const c = Math.min(1, Math.max(-1, cosTheta));
+  const halfSin = Math.sqrt((1 - c) / 2);
+  return ((4 / 3) * halfSin) / (1 + halfSin);
+}
+
+/**
  * 閉じた頂点列を、各コーナーを局所的に丸めた曲線（3 次ベジェ列）へ変換する。
  *
  * 各頂点 V について、入り辺・出辺に沿って r = min(入り辺長, 出辺長) * [[CORNER_ROUND_RATIO]]
- * だけ戻った点 A・進んだ点 B を求め、A→B を制御点 V の 3 次ベジェで丸める。丸めの外側
+ * だけ戻った点 A・進んだ点 B を求め、A→B を「両辺に接する円弧」を近似する 3 次ベジェで丸める
+ * （ハンドル長は [[cornerHandleRatio]] を参照）。丸めの外側
  * （B_i → 次コーナーの A_{i+1}）は辺そのものなので直線で結ぶ。これにより辺は厳密に直線へ
  * 保たれ、四角形のような外形が樽型に歪まない。丸め区間は隣接辺の短い方の半分以内に収まる
  * （比率 ≤ 0.5）ため、隣り合うコーナーの丸めが重ならない。頂点が 3 未満だと面積を持つ閉曲線に
@@ -71,10 +93,13 @@ export function closedRoundedCorners(points: readonly Point[]): ClosedCurve | nu
   // 巡回アクセサ。?? は範囲内アクセスでは発火しないが、noUncheckedIndexedAccess を満たす。
   const at = (i: number): Point => points[((i % n) + n) % n] ?? { x: 0, y: 0 };
 
-  // 各頂点の丸め開始点 A（入り辺側）・終了点 B（出辺側）を先に確定する。
-  const apex: Point[] = [];
+  // 各頂点の丸め開始点 A（入り辺側）・終了点 B（出辺側）と、コーナー弧のハンドル（制御点）を
+  // 先に確定する。ハンドルは A・B から頂点へ向かって k 倍だけ伸ばした点（k < 1 なので頂点には
+  // 届かない）。
   const enter: Point[] = [];
   const leave: Point[] = [];
+  const handleIn: Point[] = [];
+  const handleOut: Point[] = [];
   for (let i = 0; i < n; i++) {
     const prev = at(i - 1);
     const cur = at(i);
@@ -86,27 +111,35 @@ export function closedRoundedCorners(points: readonly Point[]): ClosedCurve | nu
     const lenIn = Math.hypot(inX, inY);
     const lenOut = Math.hypot(outX, outY);
 
-    apex.push(cur);
     if (lenIn < MIN_EDGE_LEN || lenOut < MIN_EDGE_LEN) {
       // 退化辺（重複点）。方向が定まらないので丸めず頂点をそのまま通す。
       enter.push(cur);
       leave.push(cur);
+      handleIn.push(cur);
+      handleOut.push(cur);
       continue;
     }
     const r = Math.min(lenIn, lenOut) * CORNER_ROUND_RATIO;
-    enter.push({ x: cur.x - (inX / lenIn) * r, y: cur.y - (inY / lenIn) * r });
-    leave.push({ x: cur.x + (outX / lenOut) * r, y: cur.y + (outY / lenOut) * r });
+    const a = { x: cur.x - (inX / lenIn) * r, y: cur.y - (inY / lenIn) * r };
+    const b = { x: cur.x + (outX / lenOut) * r, y: cur.y + (outY / lenOut) * r };
+    // 内角 θ は「V→A」と「V→B」のなす角。V→A は入り辺の逆向きなので符号を反転して内積を取る。
+    const cosTheta = -((inX * outX + inY * outY) / (lenIn * lenOut));
+    const k = cornerHandleRatio(cosTheta);
+
+    enter.push(a);
+    leave.push(b);
+    handleIn.push(lerp(a, cur, k));
+    handleOut.push(lerp(b, cur, k));
   }
 
-  // コーナー弧（A_i→B_i、制御点は頂点 V_i）と、その後の直線辺（B_i→A_{i+1}）を交互に並べる。
+  // コーナー弧（A_i→B_i）と、その後の直線辺（B_i→A_{i+1}）を交互に並べる。
   // 直線辺は端点を 1/3・2/3 で内分した制御点にすることで 3 次ベジェとして厳密な直線になる。
   const segments: CubicBezierSegment[] = [];
   for (let i = 0; i < n; i++) {
     const b = leave[i] ?? at(i);
-    const v = apex[i] ?? at(i);
     const nextA = enter[(i + 1) % n] ?? at(i + 1);
-    // コーナー弧：制御点 2 つとも頂点に置く（＝2 次ベジェ相当の角丸）。
-    segments.push({ c1: v, c2: v, end: b });
+    // コーナー弧：制御点は頂点そのものではなく、両辺に接する円弧に合わせて短縮したハンドル。
+    segments.push({ c1: handleIn[i] ?? b, c2: handleOut[i] ?? b, end: b });
     // 直線辺：B_i → 次コーナーの A_{i+1}。
     segments.push({ c1: lerp(b, nextA, 1 / 3), c2: lerp(b, nextA, 2 / 3), end: nextA });
   }
