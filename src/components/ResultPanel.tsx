@@ -4,7 +4,11 @@
 // コンポーネント。計算は一切行わず、確定済みの結果を整形表示するのみ。
 // 結果が無い（未解析・失敗）場合は各値をプレースホルダ（—）で表示する。
 
+import { CircleAlert } from 'lucide-react';
+
+import { RECOMMENDED_DPI } from '@/analysis/scale';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { AnalysisResult } from '@/model/types';
 
 export interface ResultPanelProps {
@@ -19,6 +23,11 @@ const PLACEHOLDER = '—';
 interface ResultRow {
   label: string;
   value: string;
+  /**
+   * 値が推奨範囲を外れている場合の注意文。
+   * 解析は成立している（＝エラーではない）ため、項目名の隣に注意アイコンで添えるだけに留める。
+   */
+  warning?: string;
 }
 
 /**
@@ -43,7 +52,15 @@ function buildRows(result: AnalysisResult | null): ResultRow[] {
     },
     // 絵柄の画素密度。実寸（＝フィギュア高さ指定）に対して画像の解像度が足りているかを
     // 印刷業界で馴染みのある単位で示す。小数は判断に寄与しないため整数で丸める。
-    { label: '画像解像度', value: num(result?.dpi, 'dpi', 0) },
+    // 推奨値を下回るときは、印刷すると絵柄が粗くなることに気付けるよう警告を添える。
+    {
+      label: '画像解像度',
+      value: num(result?.dpi, 'dpi', 0),
+      // exactOptionalPropertyTypes 下では undefined を直接代入できないため、条件付きで生やす。
+      ...(result !== null && result.dpi < RECOMMENDED_DPI
+        ? { warning: `推奨画像解像度(${RECOMMENDED_DPI}dpi)を下回ります` }
+        : {}),
+    },
     {
       label: '重心座標',
       value: result
@@ -90,7 +107,22 @@ export function ResultPanel({ result }: ResultPanelProps) {
               key={row.label}
               className="flex items-baseline justify-between gap-2 border-b py-1 last:border-b-0"
             >
-              <dt className="text-muted-foreground text-sm">{row.label}</dt>
+              <dt className="text-muted-foreground flex items-center gap-1 text-sm">
+                {row.label}
+                {row.warning !== undefined && (
+                  <Tooltip>
+                    {/* Trigger は button なのでホバーだけでなくキーボードフォーカスでも開く。
+                        アイコン単体では読み上げ名を持たないため aria-label に注意文を持たせる。 */}
+                    <TooltipTrigger
+                      aria-label={row.warning}
+                      className="focus-visible:ring-ring/50 rounded-full text-amber-600 outline-none focus-visible:ring-[3px] dark:text-amber-500"
+                    >
+                      <CircleAlert className="size-4" />
+                    </TooltipTrigger>
+                    <TooltipContent>{row.warning}</TooltipContent>
+                  </Tooltip>
+                )}
+              </dt>
               <dd className="text-sm font-medium tabular-nums whitespace-nowrap">{row.value}</dd>
             </div>
           ))}
