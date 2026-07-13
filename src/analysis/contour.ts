@@ -20,7 +20,13 @@
 
 import polygonClipping, { type MultiPolygon, type Polygon, type Ring } from 'polygon-clipping';
 
-import { closeMask, dilateMask, type DilatedMask } from '@/analysis/distance';
+import {
+  closeMask,
+  closeMaskAround,
+  dilateMask,
+  type DilatedMask,
+  type MaskRegion,
+} from '@/analysis/distance';
 import type { Contour, Point, SlotRect, SlotResult } from '@/model/types';
 import { convexHull, simplifyPolyline } from '@/utils/geometry';
 
@@ -271,8 +277,8 @@ export function extractContours(mask: Uint8Array, width: number, height: number)
 
 // ---------------------------------------------------------------------------
 // カットライン生成：αマスクを「余白ぶん膨張（EDT）→ 狭い隙間の充填（クロージング）→
-// 輪郭抽出 → 残った分離パーツの最小幅ブリッジ連結 → 平滑化」して、実際に切り出す
-// アクリル外形（カットライン）へ整える。SPEC「カットライン」節の手順。
+// 輪郭抽出 → 残った分離パーツの最小幅ブリッジ連結（＋接合部の充填）→ 平滑化」して、実際に
+// 切り出すアクリル外形（カットライン）へ整える。SPEC「カットライン」節の手順。
 //
 // 余白オフセットは以前、間引き済みポリゴンへの素朴なミターオフセット＋ union（自己交差
 // 除去）で実装していたが、細かい凹凸（髪の毛等）を持つ 3000px 級の輪郭では自己交差が
@@ -288,6 +294,12 @@ export function extractContours(mask: Uint8Array, width: number, height: number)
 // 隙間埋めは首部を含んだ最終形状に対して掛けねばならない（首部の側面とフィギュア外形の
 // 間にできる狭い隙間も充填対象）。そこで膨張マスクを共有したまま、首部を塗り足した
 // マスクからカットラインを起こし直せるようにしてある。
+//
+// 「隙間埋めはアクリルへ足した材料を含む最終形状に対して掛ける」原則は連結部（ブリッジ）にも
+// 効く。ブリッジの側面とパーツ輪郭が作る入隅は接合点へ向かって幅 0 まで細くなる隙間であり、
+// 常に閾値より狭い区間を含むため、本来は必ず充填対象になる。多角形として外形へ継ぎ足すだけでは
+// ここが尖ったまま残るので、ブリッジもマスクへ塗り足し、その周辺だけをクロージングし直して
+// （closeMaskAround）接合部を半径 r の円弧でつなぐ（SPEC「隙間埋めと連結部の整合」）。
 
 /**
  * Chaikin 反復で増えた頂点を間引く際の許容ずれ(px)。
@@ -499,27 +511,31 @@ function bridgeRect(a: Point, b: Point, widthPx: number): Point[] | null {
 }
 
 /**
- * 分離した複数リングを連結するブリッジ矩形群を生成する（最小全域木＝連結の総延長最小）。
+ * 分離した複数リングをつなぐ連結（端点対）を選ぶ（最小全域木＝連結の総延長最小）。
  *
  * すべてのパーツを 1 枚へつなぐには最低でも (パーツ数-1) 本の連結が要る。連結部の総延長が
- * 最小になるよう、パーツ間の最短ギャップを辺重みとした最小全域木（Prim 法）を張り、その各辺を
- * 幅 widthPx のブリッジ矩形にする。これにより「すべてのパーツを囲みつつ、連結部は最小幅で、
- * 余分な材料を増やさない」外形になる。パーツ間の最近点対は事前に総当たりで求めてキャッシュする。
+ * 最小になるよう、パーツ間の最短ギャップを辺重みとした最小全域木（Prim 法）を張る。これにより
+ * 「すべてのパーツを囲みつつ、連結部は最小幅で、余分な材料を増やさない」外形になる。パーツ間の
+ * 最近点対は事前に総当たりで求めてキャッシュする。
+ *
+ * 幅を与えず端点対のまま返すのは、同じ連結をマスクへ塗る経路（fillBridgeJunctions）と多角形の
+ * まま union する経路（envelopeFromParts）が別々の幅で矩形化するため。最近点対の総当たりは
+ * リング頂点数の積に比例して重く、経路ごとに引き直すと二度手間になる。
  */
-function buildBridges(rings: readonly Point[][], widthPx: number): Point[][] {
+function bridgeLinks(rings: readonly Point[][]): RingLink[] {
   const k = rings.length;
-  if (k < 2 || !(widthPx > 0)) {
+  if (k < 2) {
     return [];
   }
 
   // パーツ対ごとの最短連結を事前計算（対称なので上三角のみ）。
-  const links: (RingLink | null)[][] = Array.from({ length: k }, () =>
+  const cache: (RingLink | null)[][] = Array.from({ length: k }, () =>
     new Array<RingLink | null>(k).fill(null),
   );
   const linkOf = (i: number, j: number): RingLink => {
     const a = i < j ? i : j;
     const b = i < j ? j : i;
-    const cached = links[a]?.[b];
+    const cached = cache[a]?.[b];
     if (cached) return cached;
     const ra = rings[a];
     const rb = rings[b];
@@ -527,7 +543,7 @@ function buildBridges(rings: readonly Point[][], widthPx: number): Point[][] {
       ra && rb
         ? closestBetweenRings(ra, rb)
         : { a: { x: 0, y: 0 }, b: { x: 0, y: 0 }, gap2: Number.POSITIVE_INFINITY };
-    const row = links[a];
+    const row = cache[a];
     if (row) row[b] = link;
     return link;
   };
@@ -535,7 +551,7 @@ function buildBridges(rings: readonly Point[][], widthPx: number): Point[][] {
   // Prim 法：ノード 0 から木を育て、木内→木外で最短の辺を 1 本ずつ採用する。
   const inTree = new Array<boolean>(k).fill(false);
   inTree[0] = true;
-  const bridges: Point[][] = [];
+  const links: RingLink[] = [];
 
   for (let added = 1; added < k; added++) {
     let bestI = -1;
@@ -555,62 +571,52 @@ function buildBridges(rings: readonly Point[][], widthPx: number): Point[][] {
     }
     if (bestJ < 0) break;
     inTree[bestJ] = true;
-    const link = linkOf(bestI, bestJ);
-    const rect = bridgeRect(link.a, link.b, widthPx);
-    if (rect) bridges.push(rect);
+    links.push(linkOf(bestI, bestJ));
   }
 
-  return bridges;
+  return links;
+}
+
+/** 連結（端点対）の列を、幅 widthPx のブリッジ矩形群にする。幅が非正なら連結不能として空。 */
+function bridgeRects(links: readonly RingLink[], widthPx: number): Point[][] {
+  if (!(widthPx > 0)) {
+    return [];
+  }
+  const rects: Point[][] = [];
+  for (const link of links) {
+    const rect = bridgeRect(link.a, link.b, widthPx);
+    if (rect) rects.push(rect);
+  }
+  return rects;
 }
 
 /**
- * 膨張後もなお分離している複数パーツから 1 枚のアクリル外形（カットライン）を求める。
+ * 分離した複数パーツとブリッジ矩形を、多角形のまま union して 1 枚の外形へまとめる。
  *
- * SPEC「複数パーツの連結」に対応する中核。入力は膨張マスク由来の単純な（自己交差の
- * ない）分離リング群で、手順は：
- * (1) union でリング群を正規化する（分離入力なら実質素通しで軽量）。
- * (2) 分離したパーツを、凸包で緩く包む代わりに、各パーツの輪郭を保ったまま最小幅
- *     minBridgeWidthPx のブリッジ（MST で総延長最小）で連結し、再度 union で 1 枚へまとめる。
- * これにより外形は不透明領域の輪郭に沿い、連結部だけが最小幅の細い首になる。連結部を作れない
- * （幅 0 等）／数値誤差で連結し切れない／union が例外を投げる異常時は、パーツを分断させない
- * 安全網として凸包へフォールバックする（通常経路では発生しない）。
+ * 隙間埋めが無効（閾値 0）で接合部を充填できないときの連結経路であり、マスク経路
+ * （fillBridgeJunctions）が 1 枚につながらなかったときの受け皿でもある。入力は膨張マスク
+ * 由来の単純な（自己交差のない）分離リング群なので、union は実質素通しで軽量。
+ *
+ * 連結部を作れない（幅 0 等）／数値誤差で連結し切れない／union が例外を投げる異常時は、
+ * パーツを分断させない安全網として凸包へフォールバックする（SPEC「例外的に連結が破綻する
+ * 場合のみ…凸包へ退避」）。
  */
-function envelopeFromParts(parts: readonly Point[][], minBridgeWidthPx: number): Point[] {
+function envelopeFromParts(parts: readonly Point[][], bridges: readonly Point[][]): Point[] {
   if (parts.length === 0) {
     return [];
   }
 
-  let rings: Point[][];
   try {
-    rings = unionOuterRings(parts);
-  } catch {
-    return convexHullOfParts(parts);
-  }
-
-  if (rings.length === 0) {
-    return convexHullOfParts(parts);
-  }
-  if (rings.length === 1) {
-    return rings[0] ?? [];
-  }
-
-  // 分離したパーツが複数残った。各輪郭を保ったまま最小幅ブリッジで連結する。
-  const bridges = buildBridges(rings, minBridgeWidthPx);
-  if (bridges.length === 0) {
-    // 連結部を張れない（幅が非正）。分断を避けるため凸包で包絡する。
-    return convexHullOfParts(parts);
-  }
-
-  try {
-    const connected = unionOuterRings([...rings, ...bridges]);
+    // ブリッジが無くても union は試す（余白で接した／間引きで触れ合ったリングはここで 1 枚になる）。
+    const connected = unionOuterRings(bridges.length > 0 ? [...parts, ...bridges] : parts);
     if (connected.length === 1) {
       return connected[0] ?? [];
     }
-    // 連結し切れなかった（数値誤差等）。全パーツを内包する安全網として凸包へ退避する。
-    return convexHullOfParts(parts);
   } catch {
-    return convexHullOfParts(parts);
+    // union の破綻。下の凸包退避へ。
   }
+
+  return convexHullOfParts(parts);
 }
 
 /**
@@ -631,59 +637,45 @@ export function buildCutlineMask(
   return dilateMask(mask, width, height, marginPx);
 }
 
-/**
- * マスクグリッドへ閉多角形（画像座標）を塗り足した新しいグリッドを返す。
- *
- * 差込部の首部をカットラインへ「隙間埋めより前に」合流させるための操作。首部は
- * 台座上面まで下へ伸びて元のグリッド外へ出得るため、必要なら多角形を覆うまでグリッドを
- * 広げる（ただし退化パラメータでスケールが極端に小さいときに際限なく広がらないよう、
- * 拡張量は元グリッドの長辺までに抑え、はみ出した部分は塗りをクリップする。クリップされた
- * 首部の下端は後段 unionSlotRects の crisp な多角形合成で復元されるため形状は壊れない）。
- *
- * 入力グリッド（呼び出し側がメモ化して使い回す膨張マスク）を破壊しないよう、常に新しい
- * バッファへコピーしてから塗る。塗りは走査線＋偶奇規則で、弧が上下に波打つ多角形でも
- * 正しく内部だけを充填する。
- */
-function paintPolygon(base: DilatedMask, polygon: readonly Point[]): DilatedMask {
-  let polyMinX = Number.POSITIVE_INFINITY;
-  let polyMinY = Number.POSITIVE_INFINITY;
-  let polyMaxX = Number.NEGATIVE_INFINITY;
-  let polyMaxY = Number.NEGATIVE_INFINITY;
-  for (const p of polygon) {
+/** 頂点列（画像座標）の外接矩形。空・非有限座標を含む入力は null。 */
+function boundsOf(points: readonly Point[]): Bounds | null {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const p of points) {
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) {
-      return base;
+      return null;
     }
-    if (p.x < polyMinX) polyMinX = p.x;
-    if (p.y < polyMinY) polyMinY = p.y;
-    if (p.x > polyMaxX) polyMaxX = p.x;
-    if (p.y > polyMaxY) polyMaxY = p.y;
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
   }
+  return points.length > 0 ? { minX, minY, maxX, maxY } : null;
+}
 
-  const baseMinX = base.offsetX;
-  const baseMinY = base.offsetY;
-  const baseMaxX = base.offsetX + base.width - 1;
-  const baseMaxY = base.offsetY + base.height - 1;
-  const maxGrow = Math.max(base.width, base.height);
+/** 外接矩形（画像座標）。 */
+interface Bounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
 
-  // 多角形を覆うまで（ただし maxGrow まで）グリッドを広げる。
-  const minX = Math.max(baseMinX - maxGrow, Math.min(baseMinX, Math.floor(polyMinX) - 1));
-  const minY = Math.max(baseMinY - maxGrow, Math.min(baseMinY, Math.floor(polyMinY) - 1));
-  const maxX = Math.min(baseMaxX + maxGrow, Math.max(baseMaxX, Math.ceil(polyMaxX) + 1));
-  const maxY = Math.min(baseMaxY + maxGrow, Math.max(baseMaxY, Math.ceil(polyMaxY) + 1));
-
-  const width = maxX - minX + 1;
-  const height = maxY - minY + 1;
-  const mask = new Uint8Array(width * height);
-  const shiftX = baseMinX - minX;
-  const shiftY = baseMinY - minY;
-  for (let y = 0; y < base.height; y++) {
-    const src = y * base.width;
-    mask.set(base.mask.subarray(src, src + base.width), (y + shiftY) * width + shiftX);
-  }
-
+/** 閉多角形 1 枚を、走査線＋偶奇規則でグリッドへ塗る（グリッド外はクリップ）。 */
+function fillScanlines(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  minX: number,
+  minY: number,
+  polygon: readonly Point[],
+  bounds: Bounds,
+): void {
   // 走査線は多角形の Y 範囲だけを見る（グリッド全体を舐めない）。
-  const firstRow = Math.max(0, Math.ceil(polyMinY) - minY);
-  const lastRow = Math.min(height - 1, Math.floor(polyMaxY) - minY);
+  const firstRow = Math.max(0, Math.ceil(bounds.minY) - minY);
+  const lastRow = Math.min(height - 1, Math.floor(bounds.maxY) - minY);
   const n = polygon.length;
   const crossings: number[] = [];
   for (let row = firstRow; row <= lastRow; row++) {
@@ -712,8 +704,166 @@ function paintPolygon(base: DilatedMask, polygon: readonly Point[]): DilatedMask
       }
     }
   }
+}
+
+/**
+ * マスクグリッドへ閉多角形群（画像座標）を塗り足した新しいグリッドを返す。
+ *
+ * 隙間埋めより前にアクリルへ足す材料（差込部の首部・パーツ連結部のブリッジ）を、マスクへ
+ * 合流させるための操作。首部は台座上面まで下へ伸びて元のグリッド外へ出得るため、必要なら
+ * 多角形を覆うまでグリッドを広げる（ただし退化パラメータでスケールが極端に小さいときに
+ * 際限なく広がらないよう、拡張量は元グリッドの長辺までに抑え、はみ出した部分は塗りを
+ * クリップする。クリップされた首部の下端は後段 unionSlotRects の crisp な多角形合成で
+ * 復元されるため形状は壊れない）。
+ *
+ * 入力グリッド（呼び出し側がメモ化して使い回す膨張マスク）を破壊しないよう、常に新しい
+ * バッファへコピーしてから塗る。塗りは走査線＋偶奇規則で、弧が上下に波打つ多角形でも
+ * 正しく内部だけを充填する。非有限な座標を含む多角形は塗らずに読み飛ばす。
+ */
+function paintPolygons(base: DilatedMask, polygons: readonly (readonly Point[])[]): DilatedMask {
+  const shapes: { polygon: readonly Point[]; bounds: Bounds }[] = [];
+  let polyMinX = Number.POSITIVE_INFINITY;
+  let polyMinY = Number.POSITIVE_INFINITY;
+  let polyMaxX = Number.NEGATIVE_INFINITY;
+  let polyMaxY = Number.NEGATIVE_INFINITY;
+  for (const polygon of polygons) {
+    const bounds = boundsOf(polygon);
+    if (!bounds) {
+      continue;
+    }
+    shapes.push({ polygon, bounds });
+    if (bounds.minX < polyMinX) polyMinX = bounds.minX;
+    if (bounds.minY < polyMinY) polyMinY = bounds.minY;
+    if (bounds.maxX > polyMaxX) polyMaxX = bounds.maxX;
+    if (bounds.maxY > polyMaxY) polyMaxY = bounds.maxY;
+  }
+  if (shapes.length === 0) {
+    return base;
+  }
+
+  const baseMinX = base.offsetX;
+  const baseMinY = base.offsetY;
+  const baseMaxX = base.offsetX + base.width - 1;
+  const baseMaxY = base.offsetY + base.height - 1;
+  const maxGrow = Math.max(base.width, base.height);
+
+  // 多角形群を覆うまで（ただし maxGrow まで）グリッドを広げる。
+  const minX = Math.max(baseMinX - maxGrow, Math.min(baseMinX, Math.floor(polyMinX) - 1));
+  const minY = Math.max(baseMinY - maxGrow, Math.min(baseMinY, Math.floor(polyMinY) - 1));
+  const maxX = Math.min(baseMaxX + maxGrow, Math.max(baseMaxX, Math.ceil(polyMaxX) + 1));
+  const maxY = Math.min(baseMaxY + maxGrow, Math.max(baseMaxY, Math.ceil(polyMaxY) + 1));
+
+  const width = maxX - minX + 1;
+  const height = maxY - minY + 1;
+  const mask = new Uint8Array(width * height);
+  const shiftX = baseMinX - minX;
+  const shiftY = baseMinY - minY;
+  for (let y = 0; y < base.height; y++) {
+    const src = y * base.width;
+    mask.set(base.mask.subarray(src, src + base.width), (y + shiftY) * width + shiftX);
+  }
+
+  for (const shape of shapes) {
+    fillScanlines(mask, width, height, minX, minY, shape.polygon, shape.bounds);
+  }
 
   return { mask, width, height, offsetX: minX, offsetY: minY };
+}
+
+/**
+ * マスクの外周を抽出し、画素段差を間引いて元画像座標へ戻したリング群を返す。
+ * 膨張・塗り足し・クロージングでずれたグリッド原点は、ここで元画像座標へ畳み込む。
+ */
+function ringsFromMask(grid: DilatedMask): Point[][] {
+  const { offsetX, offsetY } = grid;
+  return extractContours(grid.mask, grid.width, grid.height)
+    .map((c) => simplifyPolyline(c, TRACE_SIMPLIFY_EPSILON_PX))
+    .filter((c) => c.length >= 3)
+    .map((c) =>
+      offsetX === 0 && offsetY === 0 ? c : c.map((p) => ({ x: p.x + offsetX, y: p.y + offsetY })),
+    );
+}
+
+/**
+ * ブリッジをマスクへ塗る際に左右へ足す余裕(px)。
+ *
+ * 輪郭追跡は境界画素の**中心**を結ぶため、塗った矩形は 1 辺あたり最大 1px 痩せて抽出される。
+ * SPEC は連結部の幅について「最小幅を下回らない」ことだけを求めるので、痩せる側ではなく
+ * 太る側へ倒す（超過はたかだか 2px ＝ 実寸で 0.1〜0.2mm 程度で、耐久性の面でも安全側）。
+ */
+const BRIDGE_RASTER_MARGIN_PX = 1;
+
+/**
+ * ブリッジをマスクへ塗り足し、その周辺だけをクロージングし直した外形を返す。
+ *
+ * 接合部（ブリッジ側面とパーツ輪郭が作る入隅）は接合点へ向かって幅 0 まで細くなる隙間なので、
+ * 隙間埋め閾値がいくつであっても必ず「閾値より狭い」区間を含む。したがって通常の狭窄部と
+ * まったく同じクロージングを掛ければ、接合部は半径 r の円弧で自動的になめらかにつながる。
+ * 全面クロージングは O(W×H) と重いため、追加材料の周囲 2r しか結果が変わらない性質を使って
+ * ブリッジ周辺だけを掛け直す（analysis/distance の closeMaskAround）。
+ *
+ * ブリッジが細すぎて画素に落ちない等で 1 枚につながらなければ null を返し、呼び出し側で
+ * 多角形 union の経路へ退避させる。
+ */
+function fillBridgeJunctions(
+  grid: DilatedMask,
+  links: readonly RingLink[],
+  widthPx: number,
+  radiusPx: number,
+): Point[] | null {
+  const rects = bridgeRects(links, widthPx + BRIDGE_RASTER_MARGIN_PX * 2);
+  if (rects.length === 0) {
+    return null;
+  }
+
+  const painted = paintPolygons(grid, rects);
+  const regions: MaskRegion[] = [];
+  for (const rect of rects) {
+    const bounds = boundsOf(rect);
+    if (!bounds) continue;
+    // 影響範囲はグリッド座標で指定する（画像座標 → グリッド座標は原点ずれの逆変換）。
+    regions.push({
+      minX: bounds.minX - painted.offsetX,
+      minY: bounds.minY - painted.offsetY,
+      maxX: bounds.maxX - painted.offsetX,
+      maxY: bounds.maxY - painted.offsetY,
+    });
+  }
+
+  const filled = closeMaskAround(painted.mask, painted.width, painted.height, radiusPx, regions);
+  const rings = ringsFromMask({ ...painted, mask: filled });
+  return rings.length === 1 ? (rings[0] ?? null) : null;
+}
+
+/**
+ * 膨張・充填後もなお分離している複数パーツを、1 枚のアクリル外形へ連結する。
+ *
+ * SPEC「複数パーツの連結」に対応する中核。凸包で全体を緩く包む代わりに、各パーツの輪郭を
+ * 保ったまま、最小幅 minBridgeWidthPx のブリッジ（MST で連結の総延長＝余分な材料が最小）で
+ * つなぐ。これにより外形は不透明領域の輪郭に沿い、連結部だけが最小幅の細い首になる。
+ *
+ * 隙間埋めが有効（radiusPx > 0）なら、ブリッジはマスクへ塗り足してから同じ半径で
+ * クロージングし直し、接合部の入隅も通常の狭窄部と同じく充填する（SPEC「隙間埋めと連結部の
+ * 整合」）。無効なとき、およびマスク経路が 1 枚につながらなかったときは、多角形のまま union
+ * する経路へ退避する（接合部は尖ったままになるが、隙間埋め無効＝材料を足さない指定なので
+ * それが期待どおりの結果になる）。
+ */
+function connectParts(
+  grid: DilatedMask,
+  rings: readonly Point[][],
+  minBridgeWidthPx: number,
+  radiusPx: number,
+): Point[] {
+  const links = bridgeLinks(rings);
+
+  if (radiusPx > 0) {
+    const joined = fillBridgeJunctions(grid, links, minBridgeWidthPx, radiusPx);
+    if (joined) {
+      return joined;
+    }
+  }
+
+  return envelopeFromParts(rings, bridgeRects(links, minBridgeWidthPx));
 }
 
 /**
@@ -721,10 +871,10 @@ function paintPolygon(base: DilatedMask, polygon: readonly Point[]): DilatedMask
  *
  * 手順は：(1) 差込部の首部領域（neckFill、任意）をマスクへ塗り足す、(2) 閾値 gapFillPx
  * より狭い隙間を半径 gapFillPx/2 の円板クロージングで充填、(3) マスクの外周を抽出して
- * 間引き、なお分離したパーツは最小幅 minBridgeWidthPx のブリッジで連結（残れば凸包で
- * 包絡）、(4) 平滑化、(5) 間引き。曲線補完は折れ線を保ったまま描画層（overlay/SVG）が
- * 頂点列から曲線パスを起こす。以降の重心・台座計算・オーバーレイ・SVG はこの単一
- * カットライン（が囲む領域）を外形として共有する。
+ * 間引き、なお分離したパーツは最小幅 minBridgeWidthPx のブリッジで連結し、その接合部も
+ * 同じ半径で充填（連結できなければ凸包で包絡）、(4) 平滑化、(5) 間引き。曲線補完は折れ線を
+ * 保ったまま描画層（overlay/SVG）が頂点列から曲線パスを起こす。以降の重心・台座計算・
+ * オーバーレイ・SVG はこの単一カットライン（が囲む領域）を外形として共有する。
  *
  * neckFill を渡すのは 2 回目の生成（差込部の配置が決まった後）。隙間埋めは「最終的な
  * カットライン間の隙間」を対象とするため、首部を合流させた**後**のマスクに対して測る
@@ -744,33 +894,33 @@ export function cutlineFromMask(
   neckFill?: readonly Point[],
 ): Contour {
   // 差込部（首部）をカットラインの一部としてマスクへ合流させてから隙間埋めへ渡す。
-  const merged = neckFill && neckFill.length >= 3 ? paintPolygon(dilated, neckFill) : dilated;
+  const merged = neckFill && neckFill.length >= 3 ? paintPolygons(dilated, [neckFill]) : dilated;
 
   // 隙間埋め：半径 r = 閾値/2 の円板クロージングは幅 2r 未満の隙間だけを、円弧で
   // なめらかに埋める。閾値 0（無効）なら素通し。
-  const closed = closeMask(merged.mask, merged.width, merged.height, gapFillPx / 2);
+  const radiusPx = gapFillPx / 2;
+  const closed = closeMask(merged.mask, merged.width, merged.height, radiusPx);
 
   // 2 段のグリッド拡張（膨張・塗り足し＋クロージング）を合成した、元画像座標への原点ずれ。
-  const offsetX = merged.offsetX + closed.offsetX;
-  const offsetY = merged.offsetY + closed.offsetY;
+  const grid: DilatedMask = {
+    mask: closed.mask,
+    width: closed.width,
+    height: closed.height,
+    offsetX: merged.offsetX + closed.offsetX,
+    offsetY: merged.offsetY + closed.offsetY,
+  };
 
-  // 充填後マスクの外周を抽出 → 画素段差を間引き → グリッドの原点ずれを元画像座標へ戻す。
-  // クロージングで結合したパーツはここで 1 リングとして現れ、以降のブリッジ連結・凸包
-  // 退避の対象から自動的に外れる。
-  const rings = extractContours(closed.mask, closed.width, closed.height)
-    .map((c) => simplifyPolyline(c, TRACE_SIMPLIFY_EPSILON_PX))
-    .filter((c) => c.length >= 3)
-    .map((c) =>
-      offsetX === 0 && offsetY === 0 ? c : c.map((p) => ({ x: p.x + offsetX, y: p.y + offsetY })),
-    );
-
+  // 充填後マスクの外周。クロージングで結合したパーツはここで 1 リングとして現れ、以降の
+  // ブリッジ連結・凸包退避の対象から自動的に外れる（SPEC「パイプライン上の位置・整合」）。
+  const rings = ringsFromMask(grid);
   if (rings.length === 0) {
     return [];
   }
 
-  // 単一リングなら追跡結果そのままが外形（自己交差なしが保証されるため union 不要）。
-  // 複数リングが残った場合のみブリッジ連結（＋軽量な union）で 1 枚へまとめる。
-  const base = rings.length === 1 ? (rings[0] ?? []) : envelopeFromParts(rings, minBridgeWidthPx);
+  // 単一リングなら追跡結果そのままが外形（自己交差なしが保証される）。複数リングが残った
+  // 場合のみブリッジで 1 枚へ連結する。
+  const base =
+    rings.length === 1 ? (rings[0] ?? []) : connectParts(grid, rings, minBridgeWidthPx, radiusPx);
   const smoothed = smoothContour(base, smoothing);
   return simplifyPolyline(smoothed, CUTLINE_SIMPLIFY_EPSILON_PX);
 }

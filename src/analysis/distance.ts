@@ -280,3 +280,87 @@ export function closeMask(
     offsetY: dilated.offsetY,
   };
 }
+
+/** 局所クロージングの対象領域（グリッド座標の矩形、両端含む）。 */
+export interface MaskRegion {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+/**
+ * 「クロージング済みのマスクへ材料を足した」場合に限り、足した領域の周りだけをクロージング
+ * し直し、充填された材料を足し込んだ新しいマスクを返す（入力マスクは変更しない）。
+ *
+ * 結果は全面クロージング（closeMask）と一致するが、計算量は領域の周辺だけに比例する。
+ * 根拠は円板クロージング Y ↦ (Y ⊕ D_r) ⊖ D_r の 2 つの局所性：
+ *
+ *  - p が充填されるかは、**p から距離 2r 以内**のマスクだけで決まる。p ∈ close(Y) は
+ *    「p の r 近傍のどの点も Y から距離 r 以内」と同値で、判定に関わる Y の点は三角不等式より
+ *    p から 2r 以内に限られるため。
+ *  - クロージング済みの X（= close(X)）へ材料 B を足したとき、新たに充填され得るのは
+ *    **B から距離 2r 以内**に限られる。p ∉ close(X) なら「X を避ける半径 r の円板」が p を
+ *    含むように取れ、p が close(X ∪ B) に入るにはその円板が B に触れる必要があるため。
+ *
+ * よって B の外接矩形を 2r 広げた範囲だけ書き戻せば足り、その範囲を正しく求めるには
+ * さらに 2r 広い窓を切り出してクロージングすればよい。クロージングは材料を足すだけ（外延的）
+ * かつ冪等なので、窓ごとに順へ足し込んでも（先の窓の充填を後の窓が見ても）結果は変わらない。
+ *
+ * radius が非正・非有限、または領域が空なら入力をそのまま返す（隙間埋め無効）。
+ */
+export function closeMaskAround(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radiusPx: number,
+  regions: readonly MaskRegion[],
+): Uint8Array {
+  if (!Number.isFinite(radiusPx) || radiusPx <= 0 || regions.length === 0) {
+    return mask;
+  }
+
+  const radius = clampRadius(radiusPx, width, height);
+  // 影響範囲（＝書き戻す範囲）と、その値を正しく求めるのに必要な窓。+1 は格子丸めの余裕。
+  const affected = Math.ceil(2 * radius) + 1;
+  const context = affected + Math.ceil(2 * radius) + 1;
+  const out = mask.slice();
+
+  for (const region of regions) {
+    const x0 = Math.max(0, Math.floor(region.minX) - context);
+    const y0 = Math.max(0, Math.floor(region.minY) - context);
+    const x1 = Math.min(width - 1, Math.ceil(region.maxX) + context);
+    const y1 = Math.min(height - 1, Math.ceil(region.maxY) + context);
+    if (x1 < x0 || y1 < y0) {
+      continue;
+    }
+
+    const cropWidth = x1 - x0 + 1;
+    const cropHeight = y1 - y0 + 1;
+    const crop = new Uint8Array(cropWidth * cropHeight);
+    for (let y = 0; y < cropHeight; y++) {
+      const src = (y0 + y) * width + x0;
+      crop.set(out.subarray(src, src + cropWidth), y * cropWidth);
+    }
+
+    const closed = closeMask(crop, cropWidth, cropHeight, radius);
+
+    // 書き戻すのは影響範囲だけ。窓の縁は外側のマスクが見えていないぶん結果が信用できない。
+    const ax0 = Math.max(x0, Math.floor(region.minX) - affected);
+    const ay0 = Math.max(y0, Math.floor(region.minY) - affected);
+    const ax1 = Math.min(x1, Math.ceil(region.maxX) + affected);
+    const ay1 = Math.min(y1, Math.ceil(region.maxY) + affected);
+    for (let y = ay0; y <= ay1; y++) {
+      // closed は窓座標からずれたグリッド（closed 座標 + offset = 窓座標）。
+      const row = (y - y0 - closed.offsetY) * closed.width;
+      const outRow = y * width;
+      for (let x = ax0; x <= ax1; x++) {
+        if (closed.mask[row + (x - x0 - closed.offsetX)] === 1) {
+          out[outRow + x] = 1;
+        }
+      }
+    }
+  }
+
+  return out;
+}
