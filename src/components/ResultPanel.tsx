@@ -58,7 +58,7 @@ function buildRows(result: AnalysisResult | null): ResultRow[] {
       value: num(result?.dpi, 'dpi', 0),
       // exactOptionalPropertyTypes 下では undefined を直接代入できないため、条件付きで生やす。
       ...(result !== null && result.dpi < RECOMMENDED_DPI
-        ? { warning: `推奨画像解像度(${RECOMMENDED_DPI}dpi)を下回ります` }
+        ? { warning: `推奨画像解像度 (${RECOMMENDED_DPI}dpi) を下回ります` }
         : {}),
     },
     {
