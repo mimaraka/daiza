@@ -638,7 +638,7 @@ export function buildCutlineMask(
  * 台座上面まで下へ伸びて元のグリッド外へ出得るため、必要なら多角形を覆うまでグリッドを
  * 広げる（ただし退化パラメータでスケールが極端に小さいときに際限なく広がらないよう、
  * 拡張量は元グリッドの長辺までに抑え、はみ出した部分は塗りをクリップする。クリップされた
- * 首部の下端は後段 unionSlotRects の crisp な矩形合成で復元されるため形状は壊れない）。
+ * 首部の下端は後段 unionSlotRects の crisp な多角形合成で復元されるため形状は壊れない）。
  *
  * 入力グリッド（呼び出し側がメモ化して使い回す膨張マスク）を破壊しないよう、常に新しい
  * バッファへコピーしてから塗る。塗りは走査線＋偶奇規則で、弧が上下に波打つ多角形でも
@@ -969,6 +969,8 @@ export function attachSlotBody(contour: Contour, slot: SlotResult): Contour {
  * フィギュア外形の間にできる狭い隙間（脚の内側と首部の間など）も充填対象になる
  * （SPEC「隙間埋めと差込部の整合」）。ツメは含めない：ツメ幅は台座スリットへ挿さる
  * 実寸なので、クロージングの円弧でツメ根元が太らないよう後段で crisp に合成する。
+ * 後段 unionSlotRects の crisp 合成でも首部形状としてこの多角形を使う（矩形だと板の
+ * 下辺が大きく上下する形状で板の外へ張り出すため。SPEC「首部」）。
  */
 export function neckFillPolygon(contour: Contour, slot: SlotResult): Point[] | null {
   const arc = extractSlotArc(contour, slot);
@@ -976,10 +978,17 @@ export function neckFillPolygon(contour: Contour, slot: SlotResult): Point[] | n
     return null;
   }
   const baseTopY = slot.baseTopYPixel;
+  // 弧が下辺の閉じ辺（台座上面）と同一線上に重なると（持ち上げ量 0 では板の最下端が必ず
+  // 触れる）、辺が自己重複する退化リングになり、unionSlotRects の polygon-clipping が
+  // 不正な結果（切り欠き）を生む。弧を閉じ辺から SLOT_UNION_OVERLAP_PX だけ浮かせて
+  // 単純多角形に保つ。浮かせた分は板の下辺のすぐ上（板の内部）へ食い込むだけなので、
+  // マスクへの塗り足し・union のどちらの用途でも形状は変わらない。
+  const maxArcY = baseTopY - SLOT_UNION_OVERLAP_PX;
+  const liftOffBase = (p: Point): Point => (p.y > maxArcY ? { x: p.x, y: maxArcY } : p);
   return [
-    arc.pl,
-    ...arc.lowerInterior,
-    arc.pr,
+    liftOffBase(arc.pl),
+    ...arc.lowerInterior.map(liftOffBase),
+    liftOffBase(arc.pr),
     { x: arc.pr.x, y: baseTopY },
     { x: arc.pl.x, y: baseTopY },
   ];
@@ -1002,20 +1011,25 @@ function slotRectPoints(rect: SlotRect, extendTopPx = 0): Point[] {
   ];
 }
 
+/** 閉リングの符号なし面積（shoelace）。 */
+function ringArea(points: readonly Point[]): number {
+  let area2 = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    if (!a || !b) continue;
+    area2 += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(area2) / 2;
+}
+
 /** リング群から面積最大のものを選ぶ（union が複数ポリゴンへ割れた異常時の保険）。 */
 function largestRing(rings: readonly Point[][]): Point[] | null {
   let best: Point[] | null = null;
   let bestArea = 0;
   for (const ring of rings) {
     if (ring.length < 3) continue;
-    let area2 = 0;
-    for (let i = 0; i < ring.length; i++) {
-      const a = ring[i];
-      const b = ring[(i + 1) % ring.length];
-      if (!a || !b) continue;
-      area2 += a.x * b.y - b.x * a.y;
-    }
-    const area = Math.abs(area2) / 2;
+    const area = ringArea(ring);
     if (area > bestArea) {
       bestArea = area;
       best = ring;
@@ -1025,26 +1039,36 @@ function largestRing(rings: readonly Point[][]): Point[] | null {
 }
 
 /**
- * 首部を合流させた（＝隙間埋め済みの）カットラインへ、首部・ツメの矩形を crisp に合成する。
+ * 首部を合流させた（＝隙間埋め済みの）カットラインへ、首部・ツメの形状を crisp に合成する。
  *
  * マスク経由のカットラインは画素段差の間引きと平滑化（Chaikin）を受けるため、首部の側壁や
  * ツメの角が丸まって実寸から痩せる。ツメ幅＝差込口幅・首部下端＝台座上面はスリット加工に
- * 直結する寸法なので、平滑化後に本来の矩形を union して正確な形へ戻す（union は材料を足す
+ * 直結する寸法なので、平滑化後に本来の形状を union して正確な形へ戻す（union は材料を足す
  * だけなので、隙間埋めで充填された部分は失われない）。ツメは首部側へわずかに食い込ませ、
  * 台座上面での接続が数値誤差で切れないようにする。
+ *
+ * 首部に合成するのは矩形ではなく neckFill（下辺の弧と台座上面で囲む多角形、
+ * neckFillPolygon の結果）。矩形（上端＝左右端交点の浅い方）だと、板の下辺が首部幅の
+ * 範囲内で大きく上下する形状で、浅い側の高さに合わせた上部が板の輪郭の外へ張り出して
+ * しまう。neckFill は左右側壁 X と下端 Y が矩形と同一（＝加工寸法は不変）のまま、
+ * 上辺だけが板の下辺に沿うため、張り出しが生じない。
  *
  * union が破綻した（例外・リング無し）場合は null を返し、呼び出し側で従来経路
  * （attachSlotBody）へフォールバックさせる。
  */
-export function unionSlotRects(contour: Contour, slot: SlotResult): Contour | null {
+export function unionSlotRects(
+  contour: Contour,
+  slot: SlotResult,
+  neckFill: readonly Point[] | null,
+): Contour | null {
   if (contour.length < 3) {
     return null;
   }
-  // 面積 0 の矩形（持ち上げ量 0 で首部が潰れる等）は union へ渡さない。ツメは首部側へ
+  // 面積 0 の形状（持ち上げ量 0 で首部が潰れる等）は union へ渡さない。ツメは首部側へ
   // 食い込ませてあるため、首部が潰れていてもカットラインと確実に重なる。
   const parts: Point[][] = [contour.slice()];
-  if (slot.neck.widthPixel > 0 && slot.neck.heightPixel > 0) {
-    parts.push(slotRectPoints(slot.neck));
+  if (neckFill && neckFill.length >= 3 && ringArea(neckFill) > 0) {
+    parts.push(neckFill.slice());
   }
   if (slot.tab.widthPixel > 0 && slot.tab.heightPixel > 0) {
     parts.push(slotRectPoints(slot.tab, SLOT_UNION_OVERLAP_PX));

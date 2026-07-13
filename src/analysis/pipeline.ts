@@ -321,7 +321,9 @@ function buildSlottedCutline(
         neckFill,
       )
     : null;
-  const merged = (filled && unionSlotRects(filled, slot)) ?? attachSlotBody(contour, slot);
+  // 首部の crisp 合成には矩形ではなく neckFill（下辺の弧に沿う多角形）を使う。矩形だと
+  // 板の下辺が首部幅の範囲内で大きく上下する形状で、板の輪郭の外へ張り出してしまう。
+  const merged = (filled && unionSlotRects(filled, slot, neckFill)) ?? attachSlotBody(contour, slot);
 
   if (memo) {
     memo.mergedKey = key;
