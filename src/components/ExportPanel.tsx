@@ -45,7 +45,7 @@ export function ExportPanel({
           onClick={onExportSvg}
         >
           <Download />
-          SVGをエクスポート
+          SVGファイル (.svg)
         </Button>
 
         {/* SVG は線データのみが既定。絵柄が要る場合だけ画像を埋め込む（ファイルは重くなる）。 */}
@@ -70,7 +70,7 @@ export function ExportPanel({
           onClick={onExportAi}
         >
           <Download />
-          Illustrator (.ai) をエクスポート
+          Illustrator ドキュメント (.ai)
         </Button>
       </CardContent>
     </Card>
