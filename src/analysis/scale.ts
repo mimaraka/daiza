@@ -59,6 +59,15 @@ export function computeMmPerPixel(params: ScaleParameters, figureHeightPixels: n
 const MM_PER_INCH = 25.4;
 
 /**
+ * 印刷入稿で一般に推奨される最低解像度(dpi)。
+ *
+ * これを下回っても解析自体は成立するため、エラーにはせず UI の警告表示に使う。
+ * アクリルグッズの入稿要件は業者ごとに異なる（300〜400dpi）ため、その中で広く見かける
+ * 350dpi を採用している。SPEC に根拠のある値ではなく、必要なら調整してよい。
+ */
+export const RECOMMENDED_DPI = 350;
+
+/**
  * 絵柄画像の実効解像度(DPI)を求める。
  *
  * mm/px は「画像 1px が実寸で何 mm になるか」なので、その逆数（px/mm）へ 25.4 を掛けると
