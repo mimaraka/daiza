@@ -44,8 +44,6 @@ interface NumberFieldProps {
   value: number;
   constraint: { min: number; max: number; step: number };
   onValueChange: (value: number) => void;
-  /** ラベルだけでは基準が伝わらないパラメータの補足（省略可）。 */
-  hint?: string;
 }
 
 /** 単位付き数値入力の本体。プリセット選択の「カスタム」欄でも再利用する。 */
@@ -79,15 +77,7 @@ function UnitNumberInput({
   );
 }
 
-function NumberField({
-  id,
-  label,
-  unit,
-  value,
-  constraint,
-  onValueChange,
-  hint,
-}: NumberFieldProps) {
+function NumberField({ id, label, unit, value, constraint, onValueChange }: NumberFieldProps) {
   return (
     <div className="grid gap-1.5">
       <Label htmlFor={id}>{label}</Label>
@@ -98,7 +88,6 @@ function NumberField({
         constraint={constraint}
         onValueChange={onValueChange}
       />
-      {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
     </div>
   );
 }
@@ -257,7 +246,6 @@ export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftP
             value={parameters.figureHeightMm}
             constraint={PARAMETER_CONSTRAINTS.figureHeightMm}
             onValueChange={(figureHeightMm) => onParametersChange({ figureHeightMm })}
-            hint="接地面（台座の底面）からカットライン（絵柄＋余白）の上端までの全高。"
           />
           <PresetNumberField
             id="thickness"
@@ -341,7 +329,6 @@ export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftP
             value={parameters.slotDepthOffsetMm}
             constraint={PARAMETER_CONSTRAINTS.slotDepthOffsetMm}
             onValueChange={(slotDepthOffsetMm) => onParametersChange({ slotDepthOffsetMm })}
-            hint="台座の奥行中心から見たスリットの位置。前後の転倒角のバランスを調整する。"
           />
           <NumberField
             id="neck-width"
@@ -375,7 +362,6 @@ export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftP
             value={parameters.baseDepthMm}
             constraint={PARAMETER_CONSTRAINTS.baseDepthMm}
             onValueChange={(baseDepthMm) => onParametersChange({ baseDepthMm })}
-            hint="前面図には現れない上面図の寸法。前後の倒れにくさは転倒角（前）／（後）で判断する。"
           />
         </CardContent>
       </Card>

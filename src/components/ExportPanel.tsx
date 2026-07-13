@@ -72,9 +72,6 @@ export function ExportPanel({
           <Download />
           Illustrator (.ai) をエクスポート
         </Button>
-        <p className="text-muted-foreground text-xs">
-          .ai は絵柄画像を含み、「絵柄／カットライン／差込口・台座」がレイヤーに分かれます。
-        </p>
       </CardContent>
     </Card>
   );
