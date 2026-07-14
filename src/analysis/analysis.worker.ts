@@ -26,7 +26,7 @@ import {
   type ImageAnalysis,
 } from '@/analysis/pipeline';
 import { toUnexpectedError } from '@/model/errors';
-import type { AnalysisError, AnalysisParameters } from '@/model/types';
+import type { AnalysisError, AnalysisParameters, BaseShapeSource } from '@/model/types';
 
 /** メインスレッド → Worker：第 1 相（画像解析）要求。RGBA バッファは転送で渡す。 */
 export interface AnalyzeImageRequest {
@@ -48,6 +48,11 @@ export interface RunAnalysisRequest {
   /** どの画像に対する解析か。キャッシュ（第 1 相結果）との整合を検査する。 */
   imageId: number;
   params: AnalysisParameters;
+  /**
+   * 台座形状ソース（任意形状のときだけ使う）。正規化済みの折れ線（数百〜千頂点）なので
+   * 構造化クローンでも軽く、パラメータと同じく要求ごとに送る（Worker 側でキャッシュしない）。
+   */
+  baseShapeSource: BaseShapeSource | null;
 }
 
 export type AnalysisWorkerRequest = AnalyzeImageRequest | RunAnalysisRequest;
@@ -123,7 +128,7 @@ function handleAnalyzeImage(request: AnalyzeImageRequest): void {
 
 /** 第 2 相要求：キャッシュ済みの第 1 相結果とパラメータから解析結果一式を返す。 */
 function handleRunAnalysis(request: RunAnalysisRequest): void {
-  const { requestId, imageId, params } = request;
+  const { requestId, imageId, params, baseShapeSource } = request;
 
   let outcome: AnalysisOutcome;
   if (!cache || cache.imageId !== imageId) {
@@ -136,7 +141,13 @@ function handleRunAnalysis(request: RunAnalysisRequest): void {
   } else {
     try {
       const { width, height } = cache.analysis;
-      outcome = runAnalysis({ width, height }, cache.analysis, params, cache.cutlineMemo);
+      outcome = runAnalysis(
+        { width, height },
+        cache.analysis,
+        params,
+        baseShapeSource,
+        cache.cutlineMemo,
+      );
     } catch (cause) {
       // 型付き結果で表せない予期しない失敗。UI へ表示可能なエラーとして返す。
       outcome = { ok: false, error: toUnexpectedError(cause) };

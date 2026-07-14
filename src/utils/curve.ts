@@ -39,6 +39,41 @@ export interface ClosedCurve {
 }
 
 /**
+ * 閉じた頂点列を、辺を厳密な直線に保った閉曲線へ変換する（丸めなし）。
+ *
+ * 3 次ベジェの制御点を弦の 1/3・2/3 に置くと区間は厳密な直線になるため、直線だけで
+ * できた形（矩形・正多角形）も曲線と同じ [[ClosedCurve]] として表せる。台座 footprint の
+ * ように「直線のみの形」と「曲線を含む形」を 1 つの表現で扱うために要る
+ * （analysis/footprint）。3 頂点未満は閉曲線にならないため null。
+ */
+export function closedPolylineCurve(points: readonly Point[]): ClosedCurve | null {
+  const n = points.length;
+  if (n < 3) {
+    return null;
+  }
+  const at = (i: number): Point => points[i % n] ?? { x: 0, y: 0 };
+  const segments: CubicBezierSegment[] = [];
+  for (let i = 0; i < n; i++) {
+    const from = at(i);
+    const to = at(i + 1);
+    segments.push({ c1: lerp(from, to, 1 / 3), c2: lerp(from, to, 2 / 3), end: to });
+  }
+  return { start: at(0), segments };
+}
+
+/** 閉曲線の全制御点・端点へ写像を適用する（平行移動・座標系変換に使う）。 */
+export function mapCurve(curve: ClosedCurve, map: (point: Point) => Point): ClosedCurve {
+  return {
+    start: map(curve.start),
+    segments: curve.segments.map((seg) => ({
+      c1: map(seg.c1),
+      c2: map(seg.c2),
+      end: map(seg.end),
+    })),
+  };
+}
+
+/**
  * 各コーナーを丸める量（隣接 2 辺の短い方に対する比率）。
  *
  * 頂点から各隣接辺に沿ってこの比率ぶん戻った/進んだ 2 点を丸めの開始/終了とし、その間だけを
@@ -281,11 +316,21 @@ export function closedCurvePolyline(
   if (!curve || !(tolerance > 0)) {
     return points.slice();
   }
+  return flattenClosedCurve(curve, tolerance);
+}
 
+/**
+ * 閉曲線を許容誤差 tolerance（入力座標と同じ単位）で折れ線へ標本化する。
+ *
+ * 曲線を持たない区間（制御点が弦上にある直線）は 1 区間 = 1 頂点のまま通るため、直線だけで
+ * できた形（矩形・正多角形）は頂点が増えない。戻り値は閉じた頂点列の規約に従い、始点を
+ * 末尾で繰り返さない。tolerance が非正なら曲線の端点（＝元の頂点列）だけを返す。
+ */
+export function flattenClosedCurve(curve: ClosedCurve, tolerance: number): Point[] {
   const result: Point[] = [curve.start];
   let from = curve.start;
   for (const seg of curve.segments) {
-    const steps = flattenSteps(from, seg, tolerance);
+    const steps = tolerance > 0 ? flattenSteps(from, seg, tolerance) : 1;
     for (let i = 1; i <= steps; i++) {
       result.push(i === steps ? seg.end : cubicAt(from, seg, i / steps));
     }
@@ -313,28 +358,36 @@ export function closedCurvePathData(
   format: (value: number) => string = defaultFormat,
   options: ClosedCurveOptions = {},
 ): string {
-  const f = format;
   const curve = closedRoundedCorners(points, options);
+  return curve ? curvePathData(curve, format) : polylinePathData(points, format);
+}
 
-  if (!curve) {
-    // 頂点不足で曲線化できない。持っている頂点をそのまま折れ線でつなぐ。
-    const first = points[0];
-    if (!first) {
-      return '';
-    }
-    let d = `M ${f(first.x)} ${f(first.y)}`;
-    for (let i = 1; i < points.length; i++) {
-      const p = points[i];
-      if (p) {
-        d += ` L ${f(p.x)} ${f(p.y)}`;
-      }
-    }
-    return points.length > 1 ? `${d} Z` : d;
-  }
-
+/** 閉曲線を SVG path の `d` 属性（`M … C … Z`）へ変換する。 */
+export function curvePathData(
+  curve: ClosedCurve,
+  format: (value: number) => string = defaultFormat,
+): string {
+  const f = format;
   let d = `M ${f(curve.start.x)} ${f(curve.start.y)}`;
   for (const s of curve.segments) {
     d += ` C ${f(s.c1.x)} ${f(s.c1.y)} ${f(s.c2.x)} ${f(s.c2.y)} ${f(s.end.x)} ${f(s.end.y)}`;
   }
   return `${d} Z`;
+}
+
+/** 曲線化できない退化入力（3 頂点未満）向けに、頂点をそのまま折れ線でつなぐ。 */
+function polylinePathData(points: readonly Point[], format: (value: number) => string): string {
+  const f = format;
+  const first = points[0];
+  if (!first) {
+    return '';
+  }
+  let d = `M ${f(first.x)} ${f(first.y)}`;
+  for (let i = 1; i < points.length; i++) {
+    const p = points[i];
+    if (p) {
+      d += ` L ${f(p.x)} ${f(p.y)}`;
+    }
+  }
+  return points.length > 1 ? `${d} Z` : d;
 }

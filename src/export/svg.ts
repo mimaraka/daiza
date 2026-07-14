@@ -20,7 +20,7 @@ import {
   type RectMm,
 } from '@/export/geometry';
 import type { AnalysisResult } from '@/model/types';
-import { closedCurvePathData } from '@/utils/curve';
+import { closedCurvePathData, curvePathData } from '@/utils/curve';
 
 /** generateSvg の切り替え。 */
 export interface SvgExportOptions {
@@ -75,10 +75,11 @@ export function generateSvg(result: AnalysisResult, options: SvgExportOptions = 
     geometry.tab,
     `fill="none" stroke="${EXPORT_COLORS.slot}" ${strokeAttr}`,
   );
-  const baseEl = rectElement(
-    geometry.base,
-    `fill="none" stroke="${EXPORT_COLORS.base}" ${strokeAttr}`,
-  );
+  // 台座は「台座形状」で選んだ footprint の上面図。矩形以外（円・楕円・角丸・任意形状）も
+  // カットラインと同じく曲線コマンドで出力する（footprint のパス表現をそのまま写す）。
+  const baseEl =
+    `<path d="${curvePathData(geometry.base.curve, fmt)}" ` +
+    `fill="none" stroke="${EXPORT_COLORS.base}" ${strokeAttr} />`;
   // 台座に切るスリット（差込口）。台座の内側に置かれるため、台座より後に描いて重ねる。
   const baseSlotEl = rectElement(
     geometry.baseSlot,

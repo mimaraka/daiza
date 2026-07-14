@@ -11,6 +11,7 @@ import type {
   AnalysisError,
   AnalysisParameters,
   AnalysisResult,
+  BaseShapeSource,
   FigureImage,
 } from '../model/types';
 
@@ -22,6 +23,8 @@ export interface AppStateActions {
   clearImage: () => void;
   /** パラメータを部分更新する（再解析トリガー）。 */
   updateParameters: (parameters: Partial<AnalysisParameters>) => void;
+  /** 任意形状の台座形状ソースをセットする（台座奥行がアスペクト比へ追従する）。 */
+  setBaseShapeSource: (source: BaseShapeSource) => void;
   /** 解析開始を通知する。 */
   startAnalysis: () => void;
   /** 解析成功を通知し結果を反映する。 */
@@ -49,6 +52,10 @@ export function useAppState(): UseAppStateReturn {
     (parameters: Partial<AnalysisParameters>) => dispatch({ type: 'updateParameters', parameters }),
     [],
   );
+  const setBaseShapeSource = useCallback(
+    (source: BaseShapeSource) => dispatch({ type: 'setBaseShapeSource', source }),
+    [],
+  );
   const startAnalysis = useCallback(() => dispatch({ type: 'analysisStarted' }), []);
   const succeedAnalysis = useCallback(
     (result: AnalysisResult) => dispatch({ type: 'analysisSucceeded', result }),
@@ -65,11 +72,20 @@ export function useAppState(): UseAppStateReturn {
       setImage,
       clearImage,
       updateParameters,
+      setBaseShapeSource,
       startAnalysis,
       succeedAnalysis,
       failAnalysis,
     }),
-    [setImage, clearImage, updateParameters, startAnalysis, succeedAnalysis, failAnalysis],
+    [
+      setImage,
+      clearImage,
+      updateParameters,
+      setBaseShapeSource,
+      startAnalysis,
+      succeedAnalysis,
+      failAnalysis,
+    ],
   );
 
   return { state, actions };

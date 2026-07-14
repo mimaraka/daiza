@@ -9,7 +9,7 @@ import { CircleAlert } from 'lucide-react';
 import { RECOMMENDED_DPI } from '@/analysis/scale';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import type { AnalysisResult } from '@/model/types';
+import type { AnalysisResult, BaseShape } from '@/model/types';
 
 export interface ResultPanelProps {
   /** 直近の解析結果。未解析・失敗時は null。 */
@@ -18,6 +18,29 @@ export interface ResultPanelProps {
 
 /** 未確定値のプレースホルダ。全項目で共通化して表記を揃える。 */
 const PLACEHOLDER = '—';
+
+/** 台座形状の表示名（LeftPanel のセレクタと同じ語彙を使う）。 */
+const BASE_SHAPE_LABELS: Record<BaseShape, string> = {
+  rect: '矩形',
+  roundedRect: '角丸矩形',
+  circle: '円形',
+  ellipse: '楕円',
+  polygon: '正多角形',
+  custom: '任意形状',
+};
+
+/** 8 方位のラベル。方位角は右 0°・前 90°・左 180°・後 270°（SPEC「最小転倒角」）。 */
+const AZIMUTH_LABELS = ['右', '右前', '前', '左前', '左', '左後', '後', '右後'] as const;
+
+/**
+ * 方位角(度)を「135°（左前）」の形へ整える。
+ * 45° 刻みの 8 方位へ最近傍で丸めた目安ラベルを添える（正確な角度は数値で示す）。
+ */
+function formatAzimuth(azimuthDeg: number): string {
+  const normalized = ((azimuthDeg % 360) + 360) % 360;
+  const index = Math.round(normalized / 45) % 8;
+  return `${normalized.toFixed(0)}°（${AZIMUTH_LABELS[index]}）`;
+}
 
 /** 結果一覧の 1 行分（項目名と表示値）。 */
 interface ResultRow {
@@ -69,6 +92,8 @@ function buildRows(result: AnalysisResult | null): ResultRow[] {
     },
     { label: '差込口中心', value: num(result?.slot.centerXMm, 'mm') },
     { label: '差込口幅', value: num(result?.slot.widthMm, 'mm') },
+    { label: '台座形状', value: result ? BASE_SHAPE_LABELS[result.base.shape] : PLACEHOLDER },
+    // 台座幅・奥行は footprint のバウンディングボックス実寸（円形では直径×直径。SPEC）。
     { label: '台座幅', value: num(result?.base.widthMm, 'mm') },
     { label: '台座奥行', value: num(result?.base.depthMm, 'mm') },
     {
@@ -86,6 +111,14 @@ function buildRows(result: AnalysisResult | null): ResultRow[] {
     {
       label: '転倒角（後）',
       value: num(result?.stability.tippingAngleBackDeg, '°'),
+    },
+    // 全方位で最も倒れやすい方向。正多角形・任意形状では斜めになり得るため、4 方向だけでは
+    // 見落とす（矩形・円・楕円では 4 方向の最小と一致する）。
+    {
+      label: '転倒角（最小）',
+      value: result
+        ? `${result.stability.tippingAngleMinDeg.toFixed(1)} ° / ${formatAzimuth(result.stability.worstAzimuthDeg)}`
+        : PLACEHOLDER,
     },
   ];
 }

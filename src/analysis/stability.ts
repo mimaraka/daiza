@@ -1,89 +1,158 @@
-// 転倒シミュレーション：左右方向・前後方向それぞれの転倒角を求める。
+// 転倒シミュレーション：各方向の転倒角と、全方位で最小の転倒角（最悪方向）を求める。
 //
-// 台座に立ったフィギュアは、外力で傾けられると支持範囲の「端」を支点に回転して
-// 倒れる。ある方向へ倒れ始める限界は、重心の鉛直投影がその支点の真上に到達した
-// 瞬間であり、そこまでに必要な傾き角が「転倒角」＝その方向の転倒に対する余裕を表す。
-// 角が大きいほど倒れにくい。React には依存しない純粋ロジック。
+// 台座に立ったフィギュアは、外力で傾けられると支持範囲の「端」を支点に回転して倒れる。ある方向へ
+// 倒れ始める限界は、重心の鉛直投影がその支点の真上に到達した瞬間であり、そこまでに必要な傾き角が
+// 「転倒角」＝その方向の転倒に対する余裕を表す。角が大きいほど倒れにくい。React 非依存の純粋ロジック。
 //
 // SPEC の定義：
-//   θ = atan(支持端距離 / 重心高さ)
-//   ・支持端距離：重心の鉛直投影から、倒れる側の支持端までの水平距離。
-//   ・重心高さ ：台座上面（接地面）から測った重心の高さ。
-//   左右・前後それぞれについて計算する。
+//   θ(d) = atan(支持端距離(d) / 重心高さ)
+//   支持端距離(d) = h(d) − ⟨g, d⟩
+//     h(d) … footprint 凸包の**支持関数**（凸包の頂点 v にわたる max ⟨v, d⟩）
+//     g    … 重心の鉛直投影（台座ローカル座標 (重心X − 差込口中心X, 前後オフセット)）
+//   ・重心高さ … 台座上面（接地面）から測った重心の高さ。方向によらず一定（重心は板の面内に
+//     あり、奥行方向へ傾けても高さは変わらない）。
 //
-// 左右は前面図で完結する：base.ts が確定した支持範囲（supportLeftMm / supportRightMm）と
-// 台座上面（topYMm）をそのまま使い、台座計算と同じ基準で角度を出す。
+// 左右前後は d = (−1,0)／(+1,0)／(0,+1)／(0,−1) の特殊形（y は前が正）。矩形 footprint では
+// h(±x) = 台座幅/2、h(±y) = 台座奥行/2 となり、従来式（支持範囲の端・台座奥行と前後オフセット）と
+// 厳密に一致する。
 //
-// 前後は画像に写らない奥行方向なので、幾何を 1 本の軸として組み立てる。台座の奥行中心を
-// 原点にとると支持端は ±奥行/2、薄板は台座のスリットへ差し込まれるので重心の奥行位置は
-// スリット中心（slot.depthOffsetMm）そのものになる。重心高さは左右と同じ値（重心は板の
-// 面内にあり、奥行方向へ傾けても高さは変わらない）を使う。
+// 最小転倒角（最悪方向）は探索不要で閉形式に落ちる：支持端距離の全方位にわたる最小値は
+// **g から凸包の最近傍辺（の載る支持直線）までの距離**に等しく、最悪方位はその辺の外向き法線。
+// 非対称な footprint（正多角形・任意形状）では最悪方向が斜めになり得るため、4 方向だけでは
+// 見落とす（対称形では 4 方向の最小と一致する）。
 
-import type { BaseResult, Centroid, SlotResult, StabilityResult } from '@/model/types';
+import { centroidProjection } from '@/analysis/base';
+import type { BaseResult, Centroid, Point, SlotResult, StabilityResult } from '@/model/types';
 import { radToDeg } from '@/utils/geometry';
 
+/** 単位方向 d に対する凸包の支持関数 h(d) = max ⟨v, d⟩。 */
+function supportValue(hull: readonly Point[], dx: number, dy: number): number {
+  let best = Number.NEGATIVE_INFINITY;
+  for (const v of hull) {
+    const value = v.x * dx + v.y * dy;
+    if (value > best) {
+      best = value;
+    }
+  }
+  return best;
+}
+
+/** 方向 d へ倒すときの支持端距離（＝ h(d) − ⟨g, d⟩）。負値は 0 へ丸めない（検査の破れを隠さない）。 */
+function supportDistance(hull: readonly Point[], g: Point, dx: number, dy: number): number {
+  return supportValue(hull, dx, dy) - (g.x * dx + g.y * dy);
+}
+
+/** θ = atan(支持端距離 / 重心高さ) を度で返す。SPEC の定義そのもの。 */
+function tippingAngleDeg(distanceMm: number, heightMm: number): number {
+  return radToDeg(Math.atan(distanceMm / heightMm));
+}
+
+/** 最小転倒角の探索結果（最悪方向の支持端距離と方位角）。 */
+interface WorstDirection {
+  distanceMm: number;
+  /** 方位角(度、0〜360)。右 0°・前 90°・左 180°・後 270°。 */
+  azimuthDeg: number;
+}
+
 /**
- * 転倒角を左右・前後それぞれ計算する。
+ * 重心投影 g から最も近い凸包の辺（の支持直線）を探し、その距離と外向き法線の方位を返す。
  *
- * 左へ倒れる支点は支持範囲の左端 supportLeftMm、右へ倒れる支点は右端
- * supportRightMm。重心の鉛直投影 centroidXMm から各支点までの水平距離を分子、
- * 重心高さ centroidHeightMm を分母に取り、θ = atan(距離 / 高さ) を度で返す。
- * 前後の支点は台座の前縁・後縁（奥行中心 ± 奥行/2）で、重心の奥行位置は
- * スリット中心（slot.depthOffsetMm）。
+ * 支持端距離(d) の d にわたる最小値がこの距離に等しい：凸包を法線 d の直線で支えたときの
+ * 支持端距離は「g から支持直線までの距離」であり、d を回すと支持直線は凸包の各辺を順に
+ * なぞるため、最小は「最近傍辺の載る直線までの距離」になる。
  *
- * 重心高さは base.ts と同一の式（台座上面 topYMm − 重心の mm-y）。台座上面は
- * カットライン最下端 + 持ち上げ量で決まるため、画像下端ではなくこの線を基準にする。
+ * 頂点が 3 未満（退化）の凸包では方向が定まらないため null。
+ */
+function worstDirection(hull: readonly Point[], g: Point): WorstDirection | null {
+  const n = hull.length;
+  if (n < 3) {
+    return null;
+  }
+
+  // 外向き法線を得るため、凸包の巻き方向を符号付き面積から判定する（convexHull の実装に
+  // 依存しないようにする）。反時計回り（面積 > 0）なら辺 a→b の外向き法線は (dy, −dx)。
+  let area2 = 0;
+  for (let i = 0; i < n; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % n];
+    if (!a || !b) continue;
+    area2 += a.x * b.y - b.x * a.y;
+  }
+  const orientation = area2 >= 0 ? 1 : -1;
+
+  let best: WorstDirection | null = null;
+  for (let i = 0; i < n; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % n];
+    if (!a || !b) continue;
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const len = Math.hypot(ex, ey);
+    if (!(len > 0)) continue;
+
+    // 外向き単位法線。
+    const nx = (orientation * ey) / len;
+    const ny = (orientation * -ex) / len;
+    // この法線方向の支持直線は辺の上に載るので、支持端距離は g から直線までの符号付き距離。
+    const distance = (a.x - g.x) * nx + (a.y - g.y) * ny;
+    if (!best || distance < best.distanceMm) {
+      best = { distanceMm: distance, azimuthDeg: azimuthOf(nx, ny) };
+    }
+  }
+  return best;
+}
+
+/** 方向ベクトルの方位角(度、0〜360)。右 0°・前 90°（y が前）。 */
+function azimuthOf(dx: number, dy: number): number {
+  const deg = radToDeg(Math.atan2(dy, dx));
+  return (deg + 360) % 360;
+}
+
+/**
+ * 転倒角を左右・前後の 4 方向と、全方位の最小について計算する。
  *
- * null を返すのは、入力が非有限か、重心高さが正でない場合。重心が接地面上
- * （高さ 0）だと分母が 0 になり atan が定義できない（幾何的にも自立し得ない）ため、
+ * 支持範囲は台座 footprint の凸包（base.footprint.hull、台座ローカル座標）。重心の鉛直投影も
+ * 同じローカル座標で取り（analysis/base と共有）、支持関数で各方向の支持端距離を求める。
+ *
+ * null を返すのは、入力が非有限か、重心高さが正でない場合、または凸包が退化している場合。
+ * 重心が接地面上（高さ 0）だと分母が 0 になり atan が定義できない（幾何的にも自立し得ない）ため、
  * 台座計算失敗と同様に呼び出し側でエラー扱いできるよう null とする。
  *
- * なお安定な構成では重心は支持範囲内にあり（左右は台座幅の検査、前後はスリット内包の
- * 検査を base.ts が通している）、4 方向とも距離は非負になるため転倒角も非負で得られる。
+ * なお成立した構成では重心投影は凸包の内側にある（base.ts が検査済み）ため、どの方向の支持端
+ * 距離も非負になり、転倒角も非負で得られる。
  */
 export function computeStability(
   centroid: Centroid,
   slot: SlotResult,
   base: BaseResult,
 ): StabilityResult | null {
-  const centroidXMm = centroid.mm.x;
-  const { supportLeftMm, supportRightMm, depthMm, topYMm } = base;
-  const depthOffsetMm = slot.depthOffsetMm;
+  const hull = base.footprint.hull;
+  const g = centroidProjection(centroid, slot);
 
-  // 台座上面（接地面）から測った重心高さ。base.ts と同じ導出。左右・前後で共通。
-  const centroidHeightMm = topYMm - centroid.mm.y;
+  // 台座上面（接地面）から測った重心高さ。全方向で共通。
+  const centroidHeightMm = base.topYMm - centroid.mm.y;
 
-  // 不正値・ゼロ除算を下流へ伝播させない。高さが正でなければ角度は定義できない。
   if (
-    !Number.isFinite(centroidXMm) ||
-    !Number.isFinite(supportLeftMm) ||
-    !Number.isFinite(supportRightMm) ||
-    !Number.isFinite(depthMm) ||
-    !Number.isFinite(depthOffsetMm) ||
+    !Number.isFinite(g.x) ||
+    !Number.isFinite(g.y) ||
     !Number.isFinite(centroidHeightMm) ||
-    centroidHeightMm <= 0
+    centroidHeightMm <= 0 ||
+    hull.length < 3
   ) {
     return null;
   }
 
-  // 各支点までの水平距離。支持範囲内なら左右いずれも非負になる。
-  const distanceLeftMm = centroidXMm - supportLeftMm;
-  const distanceRightMm = supportRightMm - centroidXMm;
-
-  // 前後：奥行中心を原点に、重心（＝スリット中心）から前縁 +奥行/2・後縁 −奥行/2 までの距離。
-  const halfDepthMm = depthMm / 2;
-  const distanceFrontMm = halfDepthMm - depthOffsetMm;
-  const distanceBackMm = halfDepthMm + depthOffsetMm;
+  const worst = worstDirection(hull, g);
+  if (!worst) {
+    return null;
+  }
 
   return {
-    tippingAngleLeftDeg: tippingAngleDeg(distanceLeftMm, centroidHeightMm),
-    tippingAngleRightDeg: tippingAngleDeg(distanceRightMm, centroidHeightMm),
-    tippingAngleFrontDeg: tippingAngleDeg(distanceFrontMm, centroidHeightMm),
-    tippingAngleBackDeg: tippingAngleDeg(distanceBackMm, centroidHeightMm),
+    tippingAngleLeftDeg: tippingAngleDeg(supportDistance(hull, g, -1, 0), centroidHeightMm),
+    tippingAngleRightDeg: tippingAngleDeg(supportDistance(hull, g, 1, 0), centroidHeightMm),
+    tippingAngleFrontDeg: tippingAngleDeg(supportDistance(hull, g, 0, 1), centroidHeightMm),
+    tippingAngleBackDeg: tippingAngleDeg(supportDistance(hull, g, 0, -1), centroidHeightMm),
+    tippingAngleMinDeg: tippingAngleDeg(worst.distanceMm, centroidHeightMm),
+    worstAzimuthDeg: worst.azimuthDeg,
   };
-}
-
-/** θ = atan(支持端距離 / 重心高さ) を度で返す。SPEC の定義そのもの。 */
-function tippingAngleDeg(distanceMm: number, heightMm: number): number {
-  return radToDeg(Math.atan(distanceMm / heightMm));
 }

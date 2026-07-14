@@ -4,7 +4,15 @@
 // UI から切り離してテスト可能にし、React バインディング（hooks/useAppState）と
 // 責務を分離する。Redux 等のライブラリは使わない（SPEC 制約）。
 
-import type { AnalysisError, AnalysisParameters, AnalysisResult, FigureImage } from './types';
+import { clamp } from '@/utils/geometry';
+
+import type {
+  AnalysisError,
+  AnalysisParameters,
+  AnalysisResult,
+  BaseShapeSource,
+  FigureImage,
+} from './types';
 
 /** 解析パイプラインの進行状態。 */
 export type AnalysisStatus = 'idle' | 'analyzing' | 'ready' | 'error';
@@ -15,6 +23,14 @@ export interface AppState {
   image: FigureImage | null;
   /** ユーザー操作のパラメータ。 */
   parameters: AnalysisParameters;
+  /**
+   * 任意形状の台座形状ソース（正規化済み折れ線）。未読込なら null。
+   *
+   * パラメータではなく独立した状態として持つ：数百〜千頂点の折れ線であり、値ではなく
+   * 「読み込んだ資産」だからである（画像と同じ位置づけ）。台座形状が 'custom' の間は
+   * これが無いと footprint を作れないため、解析は baseShapeFailed になる。
+   */
+  baseShapeSource: BaseShapeSource | null;
   /** 直近の解析結果。未解析・失敗時は null。 */
   result: AnalysisResult | null;
   /** 解析の進行状態。 */
@@ -50,6 +66,12 @@ export const DEFAULT_PARAMETERS: AnalysisParameters = {
   baseWidthMm: 50,
   // 台座奥行も指定値がそのまま実寸。一般的なアクリルスタンドの台座奥行。
   baseDepthMm: 30,
+  // 既定は矩形（＝台座形状の拡張前と完全に同じ挙動）。
+  baseShape: 'rect',
+  baseCornerRadiusMm: 5,
+  baseDiameterMm: 50,
+  basePolygonSides: 6,
+  basePolygonRotationDeg: 0,
 };
 
 /**
@@ -69,16 +91,45 @@ export function minNeckWidthMm(slotWidthMm: number): number {
 }
 
 /**
+ * 角丸半径の上限(mm) = min(台座幅, 台座奥行) / 2。
+ * 上限に達すると短辺側が半円になる（スタジアム形。幅 = 奥行なら円と一致する）。
+ * これを超える半径は角丸同士が重なって形状が破綻するため、常にここへクランプする。
+ */
+export function maxCornerRadiusMm(widthMm: number, depthMm: number): number {
+  return Math.min(widthMm, depthMm) / 2;
+}
+
+/**
  * パラメータ間の不変条件を満たすよう正規化する。
  *
- * 現状の不変条件は「首部幅 ≧ 下限（差込口幅依存）」のみ。差込口幅を広げた結果として
- * 首部幅が下限を割る場合は、肩が消えないよう首部幅を自動的に下限まで押し上げる。
- * UI 側の入力制約だけに頼ると（差込口幅を先に変えるなど）容易に破れるため、状態遷移の
- * 中心である reducer で常に強制し、解析側は制約成立を前提にできるようにする。
+ * 不変条件は 2 つ：
+ *  - 首部幅 ≧ 下限（差込口幅 + 2×最小ショルダー幅）。差込口幅を広げた結果として首部幅が
+ *    下限を割る場合は、肩が消えないよう首部幅を自動的に下限まで押し上げる。
+ *  - 角丸半径 ≦ min(台座幅, 台座奥行)/2、正多角形の辺数は 3〜12 の整数。台座幅・奥行を
+ *    縮めた結果として角丸半径が上限を割る場合も、ここでクランプされる。
+ *
+ * UI 側の入力制約だけに頼ると（差込口幅や台座幅を先に変えるなど）容易に破れるため、状態遷移の
+ * 中心である reducer で常に強制し、解析側は制約成立を前提にできるようにする。値が既に条件を
+ * 満たしていれば同一オブジェクトを返し、無用な再解析（参照変化）を起こさない。
  */
 export function normalizeParameters(params: AnalysisParameters): AnalysisParameters {
   const minNeck = minNeckWidthMm(params.slotWidthMm);
-  return params.neckWidthMm < minNeck ? { ...params, neckWidthMm: minNeck } : params;
+  const neckWidthMm = Math.max(params.neckWidthMm, minNeck);
+
+  const maxRadius = maxCornerRadiusMm(params.baseWidthMm, params.baseDepthMm);
+  const baseCornerRadiusMm = clamp(params.baseCornerRadiusMm, 0, Math.max(0, maxRadius));
+
+  const sides = PARAMETER_CONSTRAINTS.basePolygonSides;
+  const basePolygonSides = clamp(Math.round(params.basePolygonSides), sides.min, sides.max);
+
+  if (
+    neckWidthMm === params.neckWidthMm &&
+    baseCornerRadiusMm === params.baseCornerRadiusMm &&
+    basePolygonSides === params.basePolygonSides
+  ) {
+    return params;
+  }
+  return { ...params, neckWidthMm, baseCornerRadiusMm, basePolygonSides };
 }
 
 /**
@@ -91,6 +142,14 @@ export interface ParameterConstraint {
   max?: number;
   step: number;
 }
+
+/**
+ * 数値で指定するパラメータのキー。
+ * 台座形状（baseShape）だけは列挙値であり min/max/step を持たないため、制約表の対象から外す。
+ */
+export type NumericParameterKey = {
+  [K in keyof AnalysisParameters]: AnalysisParameters[K] extends number ? K : never;
+}[keyof AnalysisParameters];
 
 /**
  * スライダー等の入力 UI・バリデーションで共有するパラメータ制約。
@@ -124,7 +183,16 @@ export const PARAMETER_CONSTRAINTS = {
   baseWidthMm: { min: 1, max: 300, step: 1 },
   // 奥行も指定値がそのまま実寸。実効下限は板厚（スリットを内包できること）に連動する。
   baseDepthMm: { min: 1, max: 300, step: 1 },
-} as const satisfies Record<keyof AnalysisParameters, ParameterConstraint>;
+  // 角丸半径の実効上限は min(台座幅, 台座奥行)/2 に連動する（maxCornerRadiusMm）。
+  // ここでの max は絶対的な天井（台座幅・奥行の上限 300 の半分）。
+  baseCornerRadiusMm: { min: 0, max: 150, step: 0.5 },
+  // 円形・正多角形の直径。台座幅・奥行と同じ実寸レンジに揃える。
+  baseDiameterMm: { min: 1, max: 300, step: 1 },
+  // 正多角形の辺数。3 未満は多角形にならず、12 を超えると円と見分けがつかない。
+  basePolygonSides: { min: 3, max: 12, step: 1 },
+  // 回転角。正の向きは方位角（右 0° → 前 90°）と同じ。
+  basePolygonRotationDeg: { min: -180, max: 180, step: 1 },
+} as const satisfies Record<NumericParameterKey, ParameterConstraint>;
 
 /**
  * 選択式で提示する標準値プリセット。
@@ -140,6 +208,7 @@ export const PARAMETER_PRESETS = {
 export const initialAppState: AppState = {
   image: null,
   parameters: DEFAULT_PARAMETERS,
+  baseShapeSource: null,
   result: null,
   status: 'idle',
   error: null,
@@ -153,6 +222,7 @@ export type AppAction =
   | { type: 'setImage'; image: FigureImage }
   | { type: 'clearImage' }
   | { type: 'updateParameters'; parameters: Partial<AnalysisParameters> }
+  | { type: 'setBaseShapeSource'; source: BaseShapeSource }
   | { type: 'analysisStarted' }
   | { type: 'analysisSucceeded'; result: AnalysisResult }
   | { type: 'analysisFailed'; error: AnalysisError };
@@ -196,6 +266,28 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         parameters: normalizeParameters({ ...state.parameters, ...action.parameters }),
         status: state.result ? 'analyzing' : state.status,
       };
+
+    case 'setBaseShapeSource': {
+      // 読み込んだ時点で台座奥行をソースのアスペクト比へ合わせる（台座幅は維持。SPEC
+      // 「正規化とスケール」）。以後は幅・奥行を独立に変更でき、引き伸ばしも許す。
+      // 奥行の変更は角丸半径の上限にも効くため、必ず normalizeParameters を通す。
+      const { baseWidthMm } = state.parameters;
+      const aspect = action.source.aspectRatio;
+      const depth = aspect > 0 ? baseWidthMm / aspect : state.parameters.baseDepthMm;
+      const constraint = PARAMETER_CONSTRAINTS.baseDepthMm;
+      const baseDepthMm = Number.isFinite(depth)
+        ? clamp(Math.round(depth * 10) / 10, constraint.min, constraint.max)
+        : state.parameters.baseDepthMm;
+      // パラメータ変更と同じ扱い：直前の結果・エラーは破棄せず、再解析の応答が届いた時点で
+      // 置き換える（第 1 相が失敗している状態でここだけ error を消すと、再解析が走らず
+      // エラー表示だけが消えてしまう）。
+      return {
+        ...state,
+        baseShapeSource: action.source,
+        parameters: normalizeParameters({ ...state.parameters, baseDepthMm }),
+        status: state.result ? 'analyzing' : state.status,
+      };
+    }
 
     case 'analysisStarted':
       return { ...state, status: 'analyzing', error: null };

@@ -32,6 +32,7 @@ import {
   unionSlotRects,
 } from '@/analysis/contour';
 import type { DilatedMask } from '@/analysis/distance';
+import { buildFootprint } from '@/analysis/footprint';
 import { computeDpi, computeMmPerPixel, computePhysicalSize } from '@/analysis/scale';
 import { findSlot } from '@/analysis/slot';
 import { computeStability } from '@/analysis/stability';
@@ -40,6 +41,7 @@ import type {
   AnalysisErrorKind,
   AnalysisParameters,
   AnalysisResult,
+  BaseShapeSource,
   Contour,
   FigureImage,
   Size,
@@ -56,11 +58,15 @@ import {
 /**
  * パイプライン段で発生し得るエラー種別。
  * 読み込み系（imageLoadFailed / unsupportedImage）は前段の imageLoader が担うため、
- * ここではアクリル領域欠如・スケール計算不可・差込口配置不可・台座計算不可の 4 種を扱う。
+ * ここではアクリル領域欠如・スケール計算不可・差込口配置不可・台座形状不可・台座計算不可を扱う。
  */
 type PipelineErrorKind = Extract<
   AnalysisErrorKind,
-  'transparentImage' | 'scaleCalculationFailed' | 'slotPlacementFailed' | 'baseCalculationFailed'
+  | 'transparentImage'
+  | 'scaleCalculationFailed'
+  | 'slotPlacementFailed'
+  | 'baseShapeFailed'
+  | 'baseCalculationFailed'
 >;
 
 /** UI へ提示するエラーメッセージ（日本語）。 */
@@ -71,8 +77,10 @@ const ERROR_MESSAGES: Record<PipelineErrorKind, string> = {
     'フィギュア高さが小さすぎます。フィギュア高さは「接地面（台座底面）からカットライン（絵柄＋余白）の上端まで」の全高です。カットライン余白×2＋アクリル板の持ち上げ量＋板厚 より大きい値を指定してください。',
   slotPlacementFailed:
     '差込部（首部・ツメ）を配置できません。首部の左右端が板からはみ出している可能性があります。首部幅を小さくする、差込口オフセットを小さくする、などパラメータを見直してください。',
+  baseShapeFailed:
+    '台座形状が利用できません。任意形状を選んでいる場合は台座形状ソース（PNG / SVG）を読み込んでください。台座の寸法（幅・奥行・直径）が正しいかも確認してください。',
   baseCalculationFailed:
-    '台座サイズを計算できません。指定した台座幅では重心を支えられない、または指定した台座奥行にスリット（幅=板厚）が収まらない可能性があります。台座幅・台座奥行を広げる、差込口オフセット（左右・前後）を小さくする、などパラメータを見直してください。',
+    '台座サイズを計算できません。指定した台座では重心を支えられない、またはスリット（幅=差込口幅・開口=板厚）が台座の縁を割っている可能性があります。台座を大きくする、差込口オフセット（左右・前後）を小さくする、などパラメータを見直してください。',
 };
 
 /** 解析の成否。成功なら結果一式、失敗なら型付きエラー。 */
@@ -344,8 +352,10 @@ function buildSlottedCutline(
  * 重いのは二値化（O(W×H)）とカットライン生成（EDT 膨張＋隙間埋め＋輪郭抽出、O(W×H)）で、
  * 隙間埋めが有効なときは差込部を合流させた 2 回目の生成も走る。cutlineMemo を渡せば、
  * 二値化／膨張マスク／カットライン／差込部込みカットラインの各段が、それぞれの依存
- * パラメータが同じ間は再利用される。それ以外（重心・差込口・台座・転倒角）は頂点数に
- * 比例する軽量計算のみ。
+ * パラメータが同じ間は再利用される。それ以外（重心・差込口・台座 footprint・台座・転倒角）は
+ * 頂点数に比例する軽量計算のみで、台座形状・寸法を変えてもカットライン段は再計算されない。
+ *
+ * baseShapeSource は台座形状「任意形状」のときだけ使う（それ以外の形状では無視される）。
  *
  * image は寸法だけを使うため、Worker 側は ImageData を持たない {width, height} でも呼べる。
  */
@@ -353,6 +363,7 @@ export function runAnalysis(
   image: Pick<FigureImage, 'width' | 'height'>,
   imageAnalysis: ImageAnalysis,
   params: AnalysisParameters,
+  baseShapeSource: BaseShapeSource | null,
   cutlineMemo?: CutlineMemo,
 ): AnalysisOutcome {
   const { width, height } = image;
@@ -444,7 +455,14 @@ export function runAnalysis(
     cutlineMemo,
   );
 
-  const base = computeBase(centroid, slot, params, baseTopYPixel * mmPerPixel);
+  // 台座 footprint（上面図の外形）。形状パラメータだけから決まり、カットライン系の重い段とは
+  // 独立している（台座形状・寸法の変更で二値化・膨張・輪郭抽出は再計算されない）。
+  const footprint = buildFootprint(params, baseShapeSource);
+  if (!footprint) {
+    return fail('baseShapeFailed');
+  }
+
+  const base = computeBase(centroid, slot, baseTopYPixel * mmPerPixel, footprint);
   if (!base) {
     return fail('baseCalculationFailed');
   }

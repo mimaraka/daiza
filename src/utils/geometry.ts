@@ -139,6 +139,95 @@ export function convexHull(points: readonly Point[]): Point[] {
   return lower.concat(upper);
 }
 
+/** 点 p から線分 a→b までの距離。a≡b の退化線分は点 a との距離を返す。 */
+export function distanceToSegment(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 <= 0) {
+    return Math.hypot(p.x - a.x, p.y - a.y);
+  }
+  const t = clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0, 1);
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+/**
+ * 点が閉多角形の内部（**境界を含む**）にあるか（交差数判定＋境界の許容距離）。
+ *
+ * 台座の成立検査（スリットの内包・重心の支持）で使う。SPEC が「境界上ちょうどは成立側に
+ * 倒す」と定めているため、いずれかの辺までの距離が epsilon 以下なら内側とみなす。epsilon は
+ * 入力と同じ単位（mm）で与える：厳密に境界へ載る指定（矩形台座で 台座奥行 = 板厚 + 2×|前後
+ * オフセット| など）が浮動小数の丸めで外側へ落ちるのを防ぐための許容であり、加工精度から見て
+ * 無視できる大きさに取る。
+ */
+export function pointInPolygon(point: Point, polygon: readonly Point[], epsilon: number): boolean {
+  const n = polygon.length;
+  if (n < 3) {
+    return false;
+  }
+  let inside = false;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const a = polygon[i];
+    const b = polygon[j];
+    if (!a || !b) {
+      continue;
+    }
+    if (distanceToSegment(point, a, b) <= epsilon) {
+      return true;
+    }
+    // 半開区間で straddle 判定し、頂点を共有する 2 辺で交点を二重計上しない。
+    if (a.y > point.y !== b.y > point.y) {
+      const x = a.x + ((point.y - a.y) / (b.y - a.y)) * (b.x - a.x);
+      if (point.x < x) {
+        inside = !inside;
+      }
+    }
+  }
+  return inside;
+}
+
+/** 点 c が有向直線 a→b のどちら側にあるか（符号付き距離）。共線なら 0。 */
+function sideOf(a: Point, b: Point, c: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  if (len <= 0) {
+    return 0;
+  }
+  // 外積を辺長で割り、値を「点から直線までの距離」（入力と同じ単位）に正規化する。
+  // こうしないと許容誤差が辺の長さに依存してしまう。
+  return ((c.x - a.x) * dy - (c.y - a.y) * dx) / len;
+}
+
+/**
+ * 2 線分が**真に交差**するか（端点での接触・共線の重なりは交差とみなさない）。
+ *
+ * 内包検査では「スリットの辺が footprint の輪郭を割っていないか」を見る。矩形台座で
+ * スリットが台座の縁にちょうど接する構成は成立（SPEC「境界上ちょうどは成立側」）なので、
+ * 各端点が相手の直線から epsilon 以内にある接触・共線ケースは交差ではないと判定する。
+ */
+export function segmentsCross(
+  a1: Point,
+  a2: Point,
+  b1: Point,
+  b2: Point,
+  epsilon: number,
+): boolean {
+  const d1 = sideOf(b1, b2, a1);
+  const d2 = sideOf(b1, b2, a2);
+  const d3 = sideOf(a1, a2, b1);
+  const d4 = sideOf(a1, a2, b2);
+  if (
+    Math.abs(d1) <= epsilon ||
+    Math.abs(d2) <= epsilon ||
+    Math.abs(d3) <= epsilon ||
+    Math.abs(d4) <= epsilon
+  ) {
+    return false;
+  }
+  return d1 > 0 !== d2 > 0 && d3 > 0 !== d4 > 0;
+}
+
 /** 度をラジアンへ変換する。三角関数（Math.tan 等）へ渡す前段で使う。 */
 export function degToRad(deg: number): number {
   return (deg * Math.PI) / 180;

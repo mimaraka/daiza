@@ -38,25 +38,20 @@ export function buildPlateGeometry(plate: Scene3dPlate): ExtrudeGeometry {
 }
 
 /**
- * 台座の押し出しジオメトリ（スリットを貫通穴として持つ）。
+ * 台座の押し出しジオメトリ（footprint を押し出し、スリットを貫通穴として持つ）。
  *
  * 台座は水平な板なので、上面図（真上から見た平面）を shape に取り、厚みぶん押し出してから
  * 寝かせる（呼び出し側で rotation.x = −90°）。この回転は (x, y, z) → (x, z, −y) の写像なので、
  * shape の y は**世界の −Z**（＝奥）に対応する。したがって奥行方向の座標は符号を反転して
- * 置く必要がある（スリット中心 Z = cz は shape 上では y = −cz）。押し出し（Z=0〜厚み）は
- * 回転後に世界 Y の 0〜厚みへ移り、台座が接地面にちょうど乗る。
+ * 置く必要がある（footprint のローカル y は「前が正」なので shape 上では −y、スリット中心
+ * Z = cz は y = −cz）。押し出し（Z=0〜厚み）は回転後に世界 Y の 0〜厚みへ移り、台座が接地面に
+ * ちょうど乗る。外形は解析が確定した footprint（矩形はその特殊形）の折れ線をそのまま使うため、
+ * 2D プレビュー・エクスポートと同じ形が立体になる。
  */
 export function buildBaseGeometry(base: Scene3dBase): ExtrudeGeometry {
-  const halfWidth = base.widthMm / 2;
-  const halfDepth = base.depthMm / 2;
-  const shape = new Shape([
-    new Vector2(-halfWidth, -halfDepth),
-    new Vector2(halfWidth, -halfDepth),
-    new Vector2(halfWidth, halfDepth),
-    new Vector2(-halfWidth, halfDepth),
-  ]);
+  const shape = new Shape(counterClockwise(base.outline.map((p) => new Vector2(p.x, -p.y))));
 
-  // スリット：幅 = 差込口幅、奥行方向の開口 = 板厚。中心は奥行中心 + 前後オフセット
+  // スリット：幅 = 差込口幅、奥行方向の開口 = 板厚。中心は奥行原点 + 前後オフセット
   // （shape 上は符号反転）。台座計算（analysis/base）が内包を検査済みなので必ず内側に収まる。
   const halfSlotWidth = base.slot.widthMm / 2;
   const halfOpening = base.slot.openingMm / 2;
@@ -71,6 +66,26 @@ export function buildBaseGeometry(base: Scene3dBase): ExtrudeGeometry {
   );
 
   return new ExtrudeGeometry(shape, { ...EXTRUDE_OPTIONS, depth: base.thicknessMm });
+}
+
+/**
+ * 頂点列を反時計回り（符号付き面積が正）へそろえる。
+ *
+ * ExtrudeGeometry は外形が反時計回りのときだけ穴の巻き方向を正規化する（外形を時計回りへ
+ * 反転し、そのとき同じ向きの穴を逆向きへ直す）。外形が最初から時計回りだとこの正規化が走らず、
+ * 穴の側壁（＝スリットの内壁）の面が裏返り、片面描画のマテリアルでは内壁が消えてしまう。
+ * footprint の巻き方向は形状ソース次第で決まらない（y の符号反転でも反転する）ため、ここで
+ * 反時計回りへそろえて three の正規化経路に必ず乗せる。
+ */
+function counterClockwise(points: Vector2[]): Vector2[] {
+  let area2 = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    if (!a || !b) continue;
+    area2 += a.x * b.y - b.x * a.y;
+  }
+  return area2 < 0 ? points.reverse() : points;
 }
 
 /**

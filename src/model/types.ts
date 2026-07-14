@@ -13,6 +13,8 @@
 // **正 = 前（手前）／負 = 後（奥）** とし、`...DepthOffsetMm` 等の名前で表す。薄板の
 // フィギュアは奥行方向にはスリットの位置でしか動かないため、この 1 スカラーで足りる。
 
+import type { ClosedCurve } from '@/utils/curve';
+
 /** 2 次元の点。座標系（px / mm）は利用側のフィールド名で区別する。 */
 export interface Point {
   x: number;
@@ -60,6 +62,69 @@ export interface FigureImage {
   /** ピクセル寸法。 */
   width: number;
   height: number;
+}
+
+/**
+ * 台座の footprint（上面図の外形）の種類。
+ *
+ * 表示のみの切替ではなく**解析パラメータ**であり、成立検査・転倒角・プレビュー・3D・
+ * エクスポートのすべてが選ばれた形状に追従する（SPEC「台座形状」）。既定は矩形で、
+ * 矩形選択時の挙動は形状拡張前の仕様と完全に一致する。
+ */
+export type BaseShape =
+  | 'rect' // 矩形（既定）：台座幅 × 台座奥行
+  | 'roundedRect' // 角丸矩形：台座幅 × 台座奥行 ＋ 角丸半径
+  | 'circle' // 円形：台座直径
+  | 'ellipse' // 楕円：台座幅（左右径） × 台座奥行（前後径）
+  | 'polygon' // 正多角形：台座直径（外接円） ＋ 辺数 ＋ 回転角
+  | 'custom'; // 任意形状：台座幅 × 台座奥行（bbox） ＋ 台座形状ソース
+
+/**
+ * 任意形状（PNG シルエット / SVG パス）から読み込んだ台座外形。
+ *
+ * ピクセルデータは保持しない（`ImageData` を state に載せない制約と同じ）。輪郭は
+ * **バウンディングボックスで正規化**した閉じた折れ線として持ち、footprint 化のときに
+ * 台座幅 × 台座奥行へ非等方スケールする（元ファイルの実寸・単位は使わない。SPEC
+ * 「正規化とスケール」）。
+ */
+export interface BaseShapeSource {
+  /** 由来。UI 表示と、読み込み時の処理の違いを説明するために持つ。 */
+  kind: 'png' | 'svg';
+  /** 読み込み元のファイル名（UI 表示用）。 */
+  fileName: string;
+  /**
+   * 正規化済みの閉じた折れ線。x・y とも [-0.5, 0.5]（bbox 中心が原点）で、
+   * **y は前（手前）が正**（上面図の規約。PNG / SVG の下方向 +Y がそのまま前に対応する）。
+   */
+  outline: Point[];
+  /** ソースのアスペクト比（幅 / 奥行）。読み込み時に台座奥行を自動設定するために使う。 */
+  aspectRatio: number;
+}
+
+/**
+ * 台座 footprint（上面図の外形、実寸 mm）。
+ *
+ * 座標は**台座ローカル座標**：原点 = footprint のバウンディングボックス中心、x = 右が正、
+ * y = **前（手前）が正**（3D シーンの Z 軸に対応する。SPEC「ローカル座標系と配置」）。
+ * 配置は 原点 X = 差込口中心 X、原点 Y(=Z) = 台座の奥行原点（前後オフセットの原点）。
+ *
+ * SPEC「内部表現（パス＋折れ線）」のとおり 2 表現を併せ持つ：曲線パスはプレビュー・
+ * エクスポートの曲線出力に、折れ線は成立検査・転倒角・3D 押し出しに使う。これにより
+ * 「見た目の曲線」と「計算に使う形」が同一の幾何から導かれ、食い違わない。
+ */
+export interface Footprint {
+  /** どの形状パラメータから作られたか。 */
+  shape: BaseShape;
+  /** 閉パス（直線＋3 次ベジェ）。 */
+  curve: ClosedCurve;
+  /** 曲線を許容誤差 0.05mm で平坦化した頂点列。 */
+  polyline: Point[];
+  /** 折れ線の凸包。支持範囲・転倒角はこれで決まる（非凸の凹みは支持範囲を狭めない）。 */
+  hull: Point[];
+  /** バウンディングボックスの幅(mm)（＝左右径）。 */
+  widthMm: number;
+  /** バウンディングボックスの奥行(mm)（＝前後径）。 */
+  depthMm: number;
 }
 
 /**
@@ -164,8 +229,32 @@ export interface AnalysisParameters {
    * 台座奥行(mm)。台座幅と同じく**ユーザー指定値がそのまま実寸の奥行**になる（自動算出しない）。
    * 前面図には現れない上面図の寸法で、スリット（幅 = 板厚）を内包する必要がある。前後方向の
    * 倒れにくさは転倒角(前)／(後) で判断する（結果パネル）。
+   *
+   * 円形・正多角形では使わない（台座直径から決まる）。楕円では前後径、任意形状では footprint の
+   * バウンディングボックスの奥行として働く。
    */
   baseDepthMm: number;
+  /** 台座 footprint の種類。既定は矩形（従来挙動）。 */
+  baseShape: BaseShape;
+  /**
+   * 角丸矩形の四隅の丸め半径(mm)。0 で矩形と一致する。上限 min(台座幅, 台座奥行)/2 は
+   * model/state の normalizeParameters が常にクランプする（台座幅・奥行の変更で上限を
+   * 割った場合も同様）。上限に達すると短辺側が半円になる（スタジアム形）。
+   */
+  baseCornerRadiusMm: number;
+  /**
+   * 円形・正多角形で用いる直径(mm)。円形では footprint の直径そのもの、正多角形では
+   * **外接円の直径**（結果パネルの台座幅・奥行には bbox 実寸が出るため、辺数・回転角に
+   * よってはこの値より小さくなる）。
+   */
+  baseDiameterMm: number;
+  /** 正多角形の辺数（3〜12 の整数。normalizeParameters が丸める）。 */
+  basePolygonSides: number;
+  /**
+   * 正多角形の回転角(度、−180〜180)。0° で前（手前）側に 1 辺が正対する。正の向きは
+   * 方位角（右 0° → 前 90°）と同じ。
+   */
+  basePolygonRotationDeg: number;
 }
 
 /** 重心解析の結果。 */
@@ -230,14 +319,20 @@ export interface SlotResult {
 
 /**
  * 台座サイズの計算結果。
- * 支持多角形の考え方に基づき、重心が支持範囲内に収まることを最低条件とする。
- * 現状は矩形台座前提。円形・楕円・任意形状は将来拡張。
+ *
+ * 台座の寸法はユーザー指定値をそのまま実寸として用い、その指定で成立するかを 2 つの検査
+ * （スリットの内包・重心の支持）で判定する（SPEC「台座サイズの検査」）。形状は footprint が
+ * 一元的に表し、矩形はその特殊形。
  */
 export interface BaseResult {
-  /** 台座幅(mm)。ユーザー指定値（AnalysisParameters.baseWidthMm）がそのまま入る。 */
+  /** 台座形状（footprint.shape と同じ。結果表示のために保持する）。 */
+  shape: BaseShape;
+  /** 台座 footprint（上面図の外形。ローカル座標 mm）。プレビュー・3D・エクスポートが従う。 */
+  footprint: Footprint;
+  /** 台座幅(mm)。footprint のバウンディングボックス幅（矩形ならユーザー指定値そのもの）。 */
   widthMm: number;
   /**
-   * 台座奥行(mm)。ユーザー指定値（AnalysisParameters.baseDepthMm）がそのまま入る。
+   * 台座奥行(mm)。footprint のバウンディングボックス奥行。
    * スリット（幅 = 板厚、位置 = slot.depthOffsetMm）を内包することは computeBase が検査済み。
    */
   depthMm: number;
@@ -246,25 +341,39 @@ export interface BaseResult {
    * 支持範囲・重心高さ（転倒角・奥行）の基準線であり、SlotResult.baseTopYPixel と同一の線。
    */
   topYMm: number;
-  /** 支持範囲の左端 X（実寸 mm 座標系）。オレンジ線・転倒角の基準。 */
+  /** 支持範囲の左端 X（実寸 mm 座標系）＝ 差込口中心 + footprint 凸包の左端。 */
   supportLeftMm: number;
   /** 支持範囲の右端 X（実寸 mm 座標系）。 */
   supportRightMm: number;
 }
 
 /**
- * 転倒シミュレーションの結果。左右方向・前後方向それぞれの転倒角。
- * いずれも θ = atan(支持端距離 / 重心高さ) で、支持端は台座の縁（左右は幅、前後は奥行）。
+ * 転倒シミュレーションの結果。
+ *
+ * いずれも θ = atan(支持端距離 / 重心高さ)。支持端距離は footprint 凸包の**支持関数**で
+ * 定める（SPEC「footprint への一般化」）ため、矩形以外の形状でも同じ定義で計算できる。
+ * 矩形では従来式（左右は台座幅、前後は台座奥行と前後オフセット）と厳密に一致する。
  */
 export interface StabilityResult {
-  /** 左方向へ倒れる際の転倒角(度)。θ = atan(支持端距離 / 重心高さ)。 */
+  /** 左方向へ倒れる際の転倒角(度)。 */
   tippingAngleLeftDeg: number;
   /** 右方向へ倒れる際の転倒角(度)。 */
   tippingAngleRightDeg: number;
-  /** 前方向へ倒れる際の転倒角(度)。支持端距離 = 台座奥行/2 − 差込口の前後オフセット。 */
+  /** 前方向へ倒れる際の転倒角(度)。 */
   tippingAngleFrontDeg: number;
-  /** 後方向へ倒れる際の転倒角(度)。支持端距離 = 台座奥行/2 + 差込口の前後オフセット。 */
+  /** 後方向へ倒れる際の転倒角(度)。 */
   tippingAngleBackDeg: number;
+  /**
+   * 全方位で最小の転倒角(度)＝最も倒れやすい方向の余裕。非対称な footprint（正多角形・
+   * 任意形状）では最悪方向が斜めになり得るため、左右前後の 4 方向だけでは見落とす。
+   * 対称形（矩形・円・楕円）では 4 方向の最小と一致する。
+   */
+  tippingAngleMinDeg: number;
+  /**
+   * 最小転倒角の方位角(度、0〜360)。**右 0°・前 90°・左 180°・後 270°**（SPEC）。
+   * その方向へ倒すときの支点は、凸包を法線方向に支える辺（最近傍辺）になる。
+   */
+  worstAzimuthDeg: number;
 }
 
 /**
@@ -301,7 +410,8 @@ export type AnalysisErrorKind =
   | 'transparentImage' // 全透明でアクリル領域が存在しない
   | 'scaleCalculationFailed' // スケール計算不可（フィギュア高さが接地面までのオフセット以下）
   | 'slotPlacementFailed' // 差込口が配置不可
-  | 'baseCalculationFailed' // 台座計算不可（重心が支持範囲外等）
+  | 'baseCalculationFailed' // 台座計算不可（重心が支持範囲外・スリットが台座の縁を割る等）
+  | 'baseShapeFailed' // 台座形状が利用できない（任意形状のソース未読込・読込失敗・寸法不正）
   | 'unexpectedError'; // 想定外の例外（バグ等）の受け皿。クラッシュさせず表示する
 
 /** UI へ提示するためのエラー情報。 */

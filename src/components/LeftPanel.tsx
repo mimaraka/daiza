@@ -7,7 +7,7 @@
 
 import { useRef, useState } from 'react';
 
-import { ImagePlus } from 'lucide-react';
+import { ImagePlus, Shapes } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -22,12 +22,23 @@ import {
 } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import {
+  maxCornerRadiusMm,
   minNeckWidthMm,
   PARAMETER_CONSTRAINTS,
   PARAMETER_PRESETS,
   type ParameterConstraint,
 } from '@/model/state';
-import type { AnalysisParameters } from '@/model/types';
+import type { AnalysisParameters, BaseShape, BaseShapeSource } from '@/model/types';
+
+/** 台座形状の選択肢（UI の表示順・ラベル）。既定は矩形。 */
+const BASE_SHAPE_OPTIONS: readonly { value: BaseShape; label: string }[] = [
+  { value: 'rect', label: '矩形' },
+  { value: 'roundedRect', label: '角丸矩形' },
+  { value: 'circle', label: '円形' },
+  { value: 'ellipse', label: '楕円' },
+  { value: 'polygon', label: '正多角形' },
+  { value: 'custom', label: '任意形状（PNG / SVG）' },
+];
 
 export interface LeftPanelProps {
   /** 現在のパラメータ値。 */
@@ -36,6 +47,10 @@ export interface LeftPanelProps {
   onParametersChange: (parameters: Partial<AnalysisParameters>) => void;
   /** ユーザーが選択した PNG ファイルを通知する。未指定なら読み込みボタンは無効。 */
   onImageFile?: (file: File) => void;
+  /** 読み込み済みの台座形状ソース（任意形状）。未読込なら null。 */
+  baseShapeSource?: BaseShapeSource | null;
+  /** ユーザーが選択した台座形状ソース（PNG / SVG）を通知する。 */
+  onBaseShapeFile?: (file: File) => void;
 }
 
 /**
@@ -167,7 +182,13 @@ function PresetNumberField({
   );
 }
 
-export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftPanelProps) {
+export function LeftPanel({
+  parameters,
+  onParametersChange,
+  onImageFile,
+  baseShapeSource,
+  onBaseShapeFile,
+}: LeftPanelProps) {
   const smoothing = PARAMETER_CONSTRAINTS.cutLineSmoothing;
   const alphaThreshold = PARAMETER_CONSTRAINTS.alphaThreshold;
   // 首部幅の下限は差込口幅に連動する（肩が消えないための不変条件）。入力側でも下限を
@@ -177,9 +198,26 @@ export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftP
     ...PARAMETER_CONSTRAINTS.neckWidthMm,
     min: minNeckWidthMm(parameters.slotWidthMm),
   };
+  // 角丸半径の上限は台座幅・奥行に連動する（min(幅, 奥行)/2 を超えると角丸同士が重なる）。
+  // 入力側でも上限を追従させ、そもそも破れる値を入れられないようにする（状態側の
+  // normalizeParameters が最終的な番人）。
+  const cornerRadius: ParameterConstraint = {
+    ...PARAMETER_CONSTRAINTS.baseCornerRadiusMm,
+    max: Math.min(
+      PARAMETER_CONSTRAINTS.baseCornerRadiusMm.max,
+      maxCornerRadiusMm(parameters.baseWidthMm, parameters.baseDepthMm),
+    ),
+  };
+  // 形状ごとに使う寸法だけを出す（SPEC「選択中の形状に該当するパラメータ欄だけを表示」）。
+  const shape = parameters.baseShape;
+  const usesWidthDepth =
+    shape === 'rect' || shape === 'roundedRect' || shape === 'ellipse' || shape === 'custom';
+  const usesDiameter = shape === 'circle' || shape === 'polygon';
+
   // ネイティブのファイル選択ダイアログは非表示 input を経由して開く。
   // 見た目は shadcn の Button に統一し、input 自体は UI から隠す。
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const baseShapeFileRef = useRef<HTMLInputElement>(null);
 
   return (
     <div className="flex flex-col gap-4">
@@ -353,22 +391,125 @@ export function LeftPanel({ parameters, onParametersChange, onImageFile }: LeftP
             onValueChange={(plateLiftMm) => onParametersChange({ plateLiftMm })}
           />
 
-          <NumberField
-            id="base-width"
-            label="台座幅"
-            unit="mm"
-            value={parameters.baseWidthMm}
-            constraint={PARAMETER_CONSTRAINTS.baseWidthMm}
-            onValueChange={(baseWidthMm) => onParametersChange({ baseWidthMm })}
-          />
-          <NumberField
-            id="base-depth"
-            label="台座奥行"
-            unit="mm"
-            value={parameters.baseDepthMm}
-            constraint={PARAMETER_CONSTRAINTS.baseDepthMm}
-            onValueChange={(baseDepthMm) => onParametersChange({ baseDepthMm })}
-          />
+          {/* 台座形状。表示のみの切替ではなく解析パラメータであり、成立検査・転倒角・
+              プレビュー・3D・エクスポートのすべてが選んだ形状に追従する（SPEC「台座形状」）。 */}
+          <div className="grid gap-1.5">
+            <Label htmlFor="base-shape">台座形状</Label>
+            <Select
+              value={shape}
+              onValueChange={(next) => onParametersChange({ baseShape: next as BaseShape })}
+            >
+              <SelectTrigger id="base-shape" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {BASE_SHAPE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* 任意形状のソース。プレビューへのドラッグ＆ドロップはフィギュア画像に予約済みなので、
+              ここではファイル選択のみを提供する（SPEC「台座形状ソース」）。 */}
+          {shape === 'custom' && (
+            <div className="grid gap-1.5">
+              <Label>台座形状ソース</Label>
+              <input
+                ref={baseShapeFileRef}
+                type="file"
+                accept="image/png,image/svg+xml,.png,.svg"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    onBaseShapeFile?.(file);
+                  }
+                  // 同じファイルを選び直しても change が発火するよう選択状態を空へ戻す。
+                  event.target.value = '';
+                }}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!onBaseShapeFile}
+                onClick={() => baseShapeFileRef.current?.click()}
+              >
+                <Shapes />
+                PNG / SVG を読み込む
+              </Button>
+              <p className="text-muted-foreground truncate text-xs">
+                {baseShapeSource
+                  ? baseShapeSource.fileName
+                  : '未読込（読み込むまで台座を計算できません）'}
+              </p>
+            </div>
+          )}
+
+          {usesWidthDepth && (
+            <NumberField
+              id="base-width"
+              label={shape === 'ellipse' ? '台座幅（左右径）' : '台座幅'}
+              unit="mm"
+              value={parameters.baseWidthMm}
+              constraint={PARAMETER_CONSTRAINTS.baseWidthMm}
+              onValueChange={(baseWidthMm) => onParametersChange({ baseWidthMm })}
+            />
+          )}
+          {usesWidthDepth && (
+            <NumberField
+              id="base-depth"
+              label={shape === 'ellipse' ? '台座奥行（前後径）' : '台座奥行'}
+              unit="mm"
+              value={parameters.baseDepthMm}
+              constraint={PARAMETER_CONSTRAINTS.baseDepthMm}
+              onValueChange={(baseDepthMm) => onParametersChange({ baseDepthMm })}
+            />
+          )}
+          {shape === 'roundedRect' && (
+            <NumberField
+              id="base-corner-radius"
+              label={`角丸半径（上限 ${cornerRadius.max}mm）`}
+              unit="mm"
+              value={parameters.baseCornerRadiusMm}
+              constraint={cornerRadius}
+              onValueChange={(baseCornerRadiusMm) => onParametersChange({ baseCornerRadiusMm })}
+            />
+          )}
+          {usesDiameter && (
+            <NumberField
+              id="base-diameter"
+              label={shape === 'polygon' ? '台座直径（外接円）' : '台座直径'}
+              unit="mm"
+              value={parameters.baseDiameterMm}
+              constraint={PARAMETER_CONSTRAINTS.baseDiameterMm}
+              onValueChange={(baseDiameterMm) => onParametersChange({ baseDiameterMm })}
+            />
+          )}
+          {shape === 'polygon' && (
+            <NumberField
+              id="base-polygon-sides"
+              label="辺数"
+              unit=""
+              value={parameters.basePolygonSides}
+              constraint={PARAMETER_CONSTRAINTS.basePolygonSides}
+              onValueChange={(basePolygonSides) => onParametersChange({ basePolygonSides })}
+            />
+          )}
+          {shape === 'polygon' && (
+            <NumberField
+              id="base-polygon-rotation"
+              label="回転角（0=前に辺が正対）"
+              unit="°"
+              value={parameters.basePolygonRotationDeg}
+              constraint={PARAMETER_CONSTRAINTS.basePolygonRotationDeg}
+              onValueChange={(basePolygonRotationDeg) =>
+                onParametersChange({ basePolygonRotationDeg })
+              }
+            />
+          )}
         </CardContent>
       </Card>
     </div>

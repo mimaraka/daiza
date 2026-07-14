@@ -70,7 +70,7 @@ interface Phase1Local {
  * 白画面クラッシュを防ぐ。
  */
 export function useAnalysis(state: AppState, actions: AppStateActions): void {
-  const { image, parameters } = state;
+  const { image, parameters, baseShapeSource } = state;
 
   // Worker 経由の第 1 相完了フラグ。Worker 応答（非同期）で立つ。
   const [phase1Ready, setPhase1Ready] = useState<Phase1Ready | null>(null);
@@ -239,8 +239,15 @@ export function useAnalysis(state: AppState, actions: AppStateActions): void {
       const requestId = ++paramsRequestIdRef.current;
       const imageId = image.id;
       const params = parameters;
+      const source = baseShapeSource;
       const timer = setTimeout(() => {
-        const request: AnalysisWorkerRequest = { type: 'runAnalysis', requestId, imageId, params };
+        const request: AnalysisWorkerRequest = {
+          type: 'runAnalysis',
+          requestId,
+          imageId,
+          params,
+          baseShapeSource: source,
+        };
         worker.postMessage(request);
       }, PARAM_DEBOUNCE_MS);
       return () => clearTimeout(timer);
@@ -257,7 +264,13 @@ export function useAnalysis(state: AppState, actions: AppStateActions): void {
         return;
       }
       try {
-        const outcome = runAnalysis(image, phase1Local.value, parameters, phase1Local.memo);
+        const outcome = runAnalysis(
+          image,
+          phase1Local.value,
+          parameters,
+          baseShapeSource,
+          phase1Local.memo,
+        );
         if (outcome.ok) {
           actionsRef.current.succeedAnalysis(outcome.result);
         } else {
@@ -269,5 +282,5 @@ export function useAnalysis(state: AppState, actions: AppStateActions): void {
       }
     }, PARAM_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [image, phase1Ready, phase1Local, parameters]);
+  }, [image, phase1Ready, phase1Local, parameters, baseShapeSource]);
 }

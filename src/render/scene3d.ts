@@ -70,13 +70,29 @@ export interface Scene3dPlate {
   readonly maxXMm: number;
 }
 
-/** 台座（幅 × 奥行の板に、スリットを貫通穴として開けたもの）。 */
+/** 台座の支持端（凸包の各方向の端。傾けの支点になる）。シーン座標 mm。 */
+export interface Scene3dSupport {
+  readonly minXMm: number;
+  readonly maxXMm: number;
+  readonly minZMm: number;
+  readonly maxZMm: number;
+}
+
+/** 台座（footprint を板厚ぶん押し出し、スリットを貫通穴として開けたもの）。 */
 export interface Scene3dBase {
+  /**
+   * footprint の外形（折れ線、台座ローカル座標 mm）。x = 右正、y = **前正**（＝シーンの Z）。
+   * 押し出しは this を水平面へ寝かせて行う（components/preview3d/geometry3d）。
+   */
+  readonly outline: readonly Point[];
+  /** footprint のバウンディングボックス寸法(mm)。カメラ構図・影の大きさに使う。 */
   readonly widthMm: number;
   readonly depthMm: number;
+  /** 凸包の支持端。左右・前後へ傾けるときの支点エッジの位置（矩形では ±幅/2・±奥行/2）。 */
+  readonly support: Scene3dSupport;
   /** 台座の厚み(mm)。板厚と同じ（ツメ深さ = 板厚 = 台座厚でツライチになる）。 */
   readonly thicknessMm: number;
-  /** 貫通スリット。幅 = 差込口幅、奥行方向の開口 = 板厚、中心 = 奥行中心 + 前後オフセット。 */
+  /** 貫通スリット。幅 = 差込口幅、奥行方向の開口 = 板厚、中心 = 奥行原点 + 前後オフセット。 */
   readonly slot: {
     readonly widthMm: number;
     readonly openingMm: number;
@@ -166,8 +182,12 @@ export function buildScene3d(result: AnalysisResult): Scene3dGeometry {
   return {
     plate,
     base: {
+      // 台座は「台座形状」で選んだ footprint（解析が確定済み）をそのまま押し出す。折れ線は
+      // 許容誤差 0.05mm で平坦化済みなので、3D 側で曲線を刻み直す必要はない。
+      outline: base.footprint.polyline,
       widthMm: base.widthMm,
       depthMm: base.depthMm,
+      support: supportOf(base.footprint.hull, base.widthMm, base.depthMm),
       thicknessMm,
       slot: {
         widthMm: slot.widthMm,
@@ -190,6 +210,35 @@ export function buildScene3d(result: AnalysisResult): Scene3dGeometry {
     explodeLiftMm: explodeLift(thicknessMm, topYMm),
     camera: cameraFrame(plate, base.widthMm),
   };
+}
+
+/**
+ * 台座 footprint の凸包から支持端（傾けの支点）を求める。
+ *
+ * 傾けの支点は「倒れる側の底辺エッジ」であり、転倒角（analysis/stability）が支持関数で見ている
+ * 端と同じ位置に取らないと、スライダーの角度と警告色の境界がずれる。凸包の各方向の端がその位置。
+ * 退化（凸包が空）した場合は bbox から取る（矩形と同じ ±幅/2・±奥行/2）。
+ */
+function supportOf(hull: readonly Point[], widthMm: number, depthMm: number): Scene3dSupport {
+  if (hull.length === 0) {
+    return {
+      minXMm: -widthMm / 2,
+      maxXMm: widthMm / 2,
+      minZMm: -depthMm / 2,
+      maxZMm: depthMm / 2,
+    };
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  for (const p of hull) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minZ) minZ = p.y;
+    if (p.y > maxZ) maxZ = p.y;
+  }
+  return { minXMm: minX, maxXMm: maxX, minZMm: minZ, maxZMm: maxZ };
 }
 
 /**

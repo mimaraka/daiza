@@ -102,6 +102,10 @@ export function buildOverlayShapes(result: AnalysisResult): OverlayShapes {
   // 重心高さ由来の大きな値がそのまま縦長の帯になって形状を覆い隠すため使わない。
   // 縦をツメ深さに揃えることで、ツメが台座を貫通していない（＝ちょうど収まる）ことも
   // そのまま目で確認できる。
+  //
+  // 横幅は台座形状によらず footprint のバウンディングボックス幅（＝凸包の左右端＝支持範囲の
+  // オレンジ線と一致）。奥行方向の形状は前面図に現れないため、上面図インセット（render/topView）で
+  // 確認する（SPEC「台座（緑矩形）の縦の長さ」）。
   const baseWidthPixel = base.widthMm / mmPerPixel;
   const baseRect: OverlayRect = {
     role: 'base',

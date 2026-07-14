@@ -4,6 +4,7 @@
 
 import { useCallback, useMemo, useState, type CSSProperties } from 'react';
 
+import { loadBaseShapeSource } from '@/analysis/baseShapeSource';
 import { loadPngFile } from '@/analysis/imageLoader';
 import { computeMmPerPixel } from '@/analysis/scale';
 import { ExportPanel } from '@/components/ExportPanel';
@@ -74,6 +75,27 @@ function App() {
         } catch (cause) {
           // loadPngFile は内部で例外を型付きエラーへ畳むが、その想定を外れた
           // 失敗（環境依存等）でも未処理の Promise 拒否で終わらせず UI へ出す。
+          actions.failAnalysis(toUnexpectedError(cause));
+        }
+      })();
+    },
+    [actions],
+  );
+
+  // 台座形状ソース（任意形状）の読み込み口。画像と同じく、失敗は例外にせず型付きエラーを
+  // state へ載せて UI（プレビュー前面のオーバーレイ）へ出す。成功時は reducer が台座奥行を
+  // ソースのアスペクト比へ合わせ、再解析が走る。
+  const handleBaseShapeFile = useCallback(
+    (file: File): void => {
+      void (async () => {
+        try {
+          const loaded = await loadBaseShapeSource(file);
+          if (loaded.ok) {
+            actions.setBaseShapeSource(loaded.source);
+          } else {
+            actions.failAnalysis(loaded.error);
+          }
+        } catch (cause) {
           actions.failAnalysis(toUnexpectedError(cause));
         }
       })();
@@ -176,6 +198,8 @@ function App() {
             parameters={state.parameters}
             onParametersChange={actions.updateParameters}
             onImageFile={handleImageFile}
+            baseShapeSource={state.baseShapeSource}
+            onBaseShapeFile={handleBaseShapeFile}
           />
         </aside>
 

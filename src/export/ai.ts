@@ -18,7 +18,7 @@ import type { PDFName as PDFNameObject } from 'pdf-lib';
 import { buildExportGeometry, EXPORT_COLORS, rectPathData, strokeWidthMm } from '@/export/geometry';
 import type { ExportGeometry, RectMm } from '@/export/geometry';
 import type { AnalysisResult, Point } from '@/model/types';
-import { closedCurvePathData } from '@/utils/curve';
+import { closedCurvePathData, curvePathData, mapCurve } from '@/utils/curve';
 
 /** PDF のユーザー空間は 1pt = 1/72 inch。mm 実寸をそのまま pt へ写す係数。 */
 const MM_TO_PT = 72 / 25.4;
@@ -173,7 +173,9 @@ export async function generateAi(result: AnalysisResult, png: EmbeddedPng): Prom
   // 独立した矩形としても出す（SVG と同じ方針）。台座に切るスリットは台座の内側の
   // 切り抜き線なので、台座の後（前面）に描く。
   inLayer('base', () => {
-    strokePath(rectPathData(rectToPt(geometry.base, viewBox), fmtPt), EXPORT_COLORS.base);
+    // 台座は footprint の曲線パス（SVG と同一の幾何）。矩形以外もベジェのまま出す。
+    const basePath = mapCurve(geometry.base.curve, (p) => toPt(p, viewBox));
+    strokePath(curvePathData(basePath, fmtPt), EXPORT_COLORS.base);
     strokePath(rectPathData(rectToPt(geometry.neck, viewBox), fmtPt), EXPORT_COLORS.slot);
     strokePath(rectPathData(rectToPt(geometry.tab, viewBox), fmtPt), EXPORT_COLORS.slot);
     strokePath(rectPathData(rectToPt(geometry.baseSlot, viewBox), fmtPt), EXPORT_COLORS.slot);

@@ -32,13 +32,16 @@ import {
   Minus,
   PersonStanding,
   Plus,
+  SquareDashed,
 } from 'lucide-react';
 
 import { Grid } from '@/components/Grid';
 import { RULER_SIZE_PX, Ruler } from '@/components/Ruler';
+import { TopView } from '@/components/TopView';
 import { Button } from '@/components/ui/button';
 import { buildOverlayShapes } from '@/render/overlay';
 import { buildSimulationShapes } from '@/render/simulation';
+import { buildTopViewShapes } from '@/render/topView';
 import { useViewport, type ContentBox } from '@/hooks/useViewport';
 import type { AnalysisStatus } from '@/model/state';
 import type { AnalysisError, AnalysisResult, FigureImage, Point } from '@/model/types';
@@ -109,6 +112,9 @@ export function Preview({
   // 方眼として画面全体へ敷けるようにする。既定は非表示（絵柄・オーバーレイの読みやすさを優先。
   // 3D の床グリッドが既定 ON なのは、床が絵柄と重ならず寸法の手掛かりが他に無いため）。
   const [showGrid, setShowGrid] = useState(false);
+  // 上面図インセットの表示切替。既定は「台座形状が矩形なら OFF、それ以外なら ON」（矩形は
+  // 前面図だけで形状が分かるため）。null = 既定に従う、true/false = ユーザーのトグル操作を優先。
+  const [topViewOverride, setTopViewOverride] = useState<boolean | null>(null);
   // 完成プレビューモード（仕上がり確認）の表示切替。表示だけの切替であり、解析・パラメータ・
   // SVG エクスポートには一切影響しない（＝この state は描画分岐にのみ使う）。
   const [finishView, setFinishView] = useState(false);
@@ -129,6 +135,14 @@ export function Preview({
   // 転倒姿勢も同様に結果が変わったときだけ再構築する。トグル OFF でも構築コストは
   // 軽い（支点 2 点の算出のみ）ため result を唯一の依存とし、描画側で表示を出し分ける。
   const simulation = useMemo(() => (result ? buildSimulationShapes(result) : null), [result]);
+
+  // 上面図（footprint・スリット・重心投影・最悪方位）。こちらも軽いので result 依存で作る。
+  const topView = useMemo(() => (result ? buildTopViewShapes(result) : null), [result]);
+
+  // 既定は矩形以外で ON（矩形は前面図だけで形状が分かる）。ユーザーが一度でも切り替えたら
+  // その選択を優先する（SPEC「ユーザーのトグル操作を優先する」）。3D 中は出さない。
+  const topViewDefault = result != null && result.base.shape !== 'rect';
+  const showTopView = (topViewOverride ?? topViewDefault) && topView != null && !show3d;
 
   // Fit/100% が収める内容範囲。画像だけでなくカットライン（余白で画像枠外へ広がり得る）や
   // 差込口・台座・支持範囲を含む外接矩形にすることで、余白を増やしても見切れないようにする
@@ -459,6 +473,10 @@ export function Preview({
             />
           )}
 
+          {/* 上面図インセット（右下・表示操作コントロールの上）。前面図に現れない台座の奥行・
+              形状と、重心投影が支持範囲（凸包）に収まっているかを確認するための表示専用の図。 */}
+          {showTopView && topView && <TopView shapes={topView} />}
+
           {/* 表示操作コントロール。stage の上（右下）へ重ねる。ボタン操作でパンが
               誤発火しないよう、ここでの pointerdown はコンテナへ伝播させない。 */}
           <div
@@ -518,6 +536,19 @@ export function Preview({
                 ボタンを残すと二重に見えてしまう）。 */}
             {!show3d && (
               <>
+                {/* 上面図インセットの表示切替。解析結果（footprint）が無い間は描く対象が無い。 */}
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setTopViewOverride(!(topViewOverride ?? topViewDefault))}
+                  disabled={!topView}
+                  className={cn(showTopView && 'text-primary bg-primary/10')}
+                  title="上面図（台座形状）"
+                  aria-label="上面図"
+                  aria-pressed={showTopView}
+                >
+                  <SquareDashed />
+                </Button>
                 {/* 実寸グリッド表示切替。実寸(mm)の格子なのでスケール（mm/px）が要る。 */}
                 <Button
                   variant="ghost"

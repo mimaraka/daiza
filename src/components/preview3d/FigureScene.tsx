@@ -101,9 +101,10 @@ export function FigureScene({
   // 板の裏面（奥）の Z。印刷レイヤはここからさらに奥へ 2 枚重ねる。
   const plateBackZ = plate.centerZMm - plate.thicknessMm / 2;
 
-  // 支点は「倒れる側」の底辺エッジ。左右は台座の左右端、前後は前後端に取る。
-  const pivotX = (tiltLeftRightDeg >= 0 ? 1 : -1) * (base.widthMm / 2);
-  const pivotZ = (tiltFrontBackDeg >= 0 ? 1 : -1) * (base.depthMm / 2);
+  // 支点は「倒れる側」の底辺エッジ。台座形状が矩形以外でも、転倒角（支持関数）が見ているのと
+  // 同じ凸包の支持端に取る（矩形では ±幅/2・±奥行/2 と一致する）。
+  const pivotX = tiltLeftRightDeg >= 0 ? base.support.maxXMm : base.support.minXMm;
+  const pivotZ = tiltFrontBackDeg >= 0 ? base.support.maxZMm : base.support.minZMm;
 
   // その向きの転倒角を超えたか（＝この角度では倒れる）。支点ハイライトを警告色にする。
   const lrLimitDeg = tiltLeftRightDeg >= 0 ? tipping.rightDeg : tipping.leftDeg;
@@ -210,8 +211,8 @@ export function FigureScene({
               {tiltLeftRightDeg !== 0 && (
                 <Line
                   points={[
-                    [pivotX, 0, -base.depthMm / 2],
-                    [pivotX, 0, base.depthMm / 2],
+                    [pivotX, 0, base.support.minZMm],
+                    [pivotX, 0, base.support.maxZMm],
                   ]}
                   color={lrFalling ? PIVOT_FALLING_COLOR : PIVOT_SAFE_COLOR}
                   lineWidth={3}
@@ -220,8 +221,8 @@ export function FigureScene({
               {tiltFrontBackDeg !== 0 && (
                 <Line
                   points={[
-                    [-base.widthMm / 2, 0, pivotZ],
-                    [base.widthMm / 2, 0, pivotZ],
+                    [base.support.minXMm, 0, pivotZ],
+                    [base.support.maxXMm, 0, pivotZ],
                   ]}
                   color={fbFalling ? PIVOT_FALLING_COLOR : PIVOT_SAFE_COLOR}
                   lineWidth={3}

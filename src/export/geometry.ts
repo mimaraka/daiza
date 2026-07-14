@@ -10,6 +10,7 @@
 
 import { slotJunctionCorners } from '@/analysis/slot';
 import type { AnalysisResult, Point } from '@/model/types';
+import { mapCurve, type ClosedCurve } from '@/utils/curve';
 
 /** 図形を配置する余白(mm)。外接矩形の外周に取り、線が縁で切れないようにする。 */
 const MARGIN_MM = 5;
@@ -45,6 +46,22 @@ export interface RectMm {
 }
 
 /**
+ * 台座 footprint（上面図の外形）を書き出し座標系(mm)へ写したもの。
+ *
+ * 曲線パス（curve）は SVG / .ai が同じ幾何を曲線コマンドで出力するために持つ（矩形以外の
+ * footprint も折れ線に落とさない。SPEC「台座のスリット」）。折れ線（outline）は viewBox の
+ * 外接算出に使う。
+ */
+export interface BaseFootprintMm {
+  /** 曲線パス（直線＋3 次ベジェ）。 */
+  curve: ClosedCurve;
+  /** 曲線を平坦化した頂点列。 */
+  outline: readonly Point[];
+  /** バウンディングボックス（上辺 = 台座上面）。 */
+  bounds: RectMm;
+}
+
+/**
  * 書き出す図形一式を mm 座標で束ねた中間表現。
  * 外接矩形（viewBox）の算出と各形式への文字列化の双方がこれを入力にすることで、
  * 座標変換を 1 箇所（buildExportGeometry）へ集約し、要素追加時の座標系ずれを防ぐ。
@@ -61,8 +78,8 @@ export interface ExportGeometry {
   neck: RectMm;
   /** 差込部のツメ（mm）。台座上面から板厚ぶん下へ伸びる。 */
   tab: RectMm;
-  /** 台座（台座上面へ上辺を合わせて置く実寸の footprint、mm）。 */
-  base: RectMm;
+  /** 台座（台座上面へ bbox 上辺を合わせて置く実寸の footprint、mm）。 */
+  base: BaseFootprintMm;
   /**
    * 台座に切るスリット（差込口）の footprint（mm）。base の内側にある切り抜き線であり、
    * これを台座と同じ図に出すことで、台座パーツだけを見て加工できる（SPEC「エクスポート」）。
@@ -88,10 +105,11 @@ export interface ExportGeometryOptions {
  * 解析結果を mm 座標の描画幾何へ変換する。
  *
  * 外形・差込部はプレビュー（render/overlay）と同じ前面図として mm 換算する。
- * 台座は前面図に現れない奥行(depthMm)を持つため、実寸の footprint（幅×奥行）を
- * **台座上面**（base.topYMm＝カットライン最下端＋持ち上げ量）に上辺を合わせて下方向へ描く。
- * これにより幅・奥行の両方を実寸のまま 1 枚の図へ載せつつ、板本体が台座と重ならないこと・
- * ツメ（深さ=板厚 ≦ 奥行）が台座を貫通しないことが出力形状の上でも保証される。
+ * 台座は前面図に現れない奥行を持つため、「台座形状」で選んだ footprint の**上面図**を、
+ * バウンディングボックスの上辺を**台座上面**（base.topYMm＝カットライン最下端＋持ち上げ量）に
+ * 合わせて下方向へ描く。これにより幅・奥行の両方を実寸のまま 1 枚の図へ載せつつ、板本体が
+ * 台座と重ならないこと・ツメ（深さ=板厚 ≦ 奥行）が台座を貫通しないことが出力形状の上でも
+ * 保証される。矩形以外の footprint も曲線パスのまま写すので、SVG と .ai は同一の幾何を共有する。
  *
  * この台座 footprint は上面図（真上から見た平面）なので、その**縦方向が奥行軸**になる。
  * 上辺（台座上面 Y）を台座の後縁、下辺を前縁とみなす（真上から見て手前が下＝前）。
@@ -127,18 +145,29 @@ export function buildExportGeometry(
     height: slot.tabDepthMm,
   };
 
-  // 台座：差込部中心を軸に左右対称。上辺を台座上面に合わせ、奥行ぶん下へ伸ばす。
-  const baseRect: RectMm = {
-    x: slot.centerXMm - base.widthMm / 2,
-    y: baseTopYMm,
-    width: base.widthMm,
-    height: base.depthMm,
+  // 台座：footprint（台座ローカル座標）を書き出し座標へ平行移動する。footprint の原点は
+  // bbox 中心・奥行原点なので、X は差込部中心へ、Y は「台座上面 + 奥行/2」へ移せばよい
+  // （bbox の上辺がちょうど台座上面に載り、+Y（下）が前になる）。回転・スケールは無い。
+  const baseOriginYMm = baseTopYMm + base.depthMm / 2;
+  const toBaseMm = (p: Point): Point => ({
+    x: slot.centerXMm + p.x,
+    y: baseOriginYMm + p.y,
+  });
+  const baseFootprint: BaseFootprintMm = {
+    curve: mapCurve(base.footprint.curve, toBaseMm),
+    outline: base.footprint.polyline.map(toBaseMm),
+    bounds: {
+      x: slot.centerXMm - base.widthMm / 2,
+      y: baseTopYMm,
+      width: base.widthMm,
+      height: base.depthMm,
+    },
   };
 
   // 台座に切るスリット：上面図なので幅 = 差込口幅（ツメ幅）、奥行方向の開口 = 板厚。
-  // 中心は「台座の奥行中心 + 前後オフセット」（下方向が前）。base.ts がスリットの内包
-  // （板厚/2 + |前後オフセット| ≦ 奥行/2）を検査済みなので、この矩形は必ず台座の内側に収まる。
-  const slitCenterYMm = baseTopYMm + base.depthMm / 2 + slot.depthOffsetMm;
+  // 中心は「台座の奥行原点 + 前後オフセット」（下方向が前）。base.ts がスリットの内包を
+  // 検査済みなので、この矩形は必ず台座 footprint の内側に収まる。
+  const slitCenterYMm = baseOriginYMm + slot.depthOffsetMm;
   const baseSlotRect: RectMm = {
     x: slot.centerXMm - slot.widthMm / 2,
     y: slitCenterYMm - slot.tabDepthMm / 2,
@@ -154,7 +183,12 @@ export function buildExportGeometry(
     height: imageSize.height * mmPerPixel,
   };
 
-  const bounds = [neckRect, tabRect, baseRect, ...(options.includeImage ? [imageRect] : [])];
+  const bounds = [
+    neckRect,
+    tabRect,
+    baseFootprint.bounds,
+    ...(options.includeImage ? [imageRect] : []),
+  ];
 
   return {
     contour: contourMm,
@@ -162,7 +196,7 @@ export function buildExportGeometry(
     sharpCorners: slotJunctionCorners(slot).map(toMm),
     neck: neckRect,
     tab: tabRect,
-    base: baseRect,
+    base: baseFootprint,
     baseSlot: baseSlotRect,
     image: imageRect,
     viewBox: computeViewBox(contourMm, bounds),
