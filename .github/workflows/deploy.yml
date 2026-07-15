@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Create CNAME file
+        run: echo "daiza.kerlos.in.th" > ./dist/CNAME
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
