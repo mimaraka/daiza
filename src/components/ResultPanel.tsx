@@ -5,6 +5,7 @@
 // 結果が無い（未解析・失敗）場合は各値をプレースホルダ（—）で表示する。
 
 import { CircleAlert } from 'lucide-react';
+import { useState } from 'react';
 
 import { RECOMMENDED_DPI } from '@/analysis/scale';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -111,6 +112,34 @@ function buildRows(result: AnalysisResult | null): ResultRow[] {
   ];
 }
 
+/**
+ * 推奨範囲外を知らせる注意アイコン＋ツールチップ。
+ *
+ * Radix の Tooltip はホバー／フォーカスで開くため、ホバーが発火しないタッチ端末
+ * （スマートフォン・タブレット）ではアイコンをタップしても開かない。そこで open を
+ * 制御し、タップ（クリック）でトグルできるようにする。マウス環境ではホバーで開く
+ * 従来挙動を onOpenChange 経由でそのまま維持する。
+ */
+function WarningIndicator({ message }: { message: string }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <Tooltip open={open} onOpenChange={setOpen}>
+      {/* Trigger は button なのでホバーだけでなくキーボードフォーカスでも開く。
+          アイコン単体では読み上げ名を持たないため aria-label に注意文を持たせる。 */}
+      <TooltipTrigger
+        aria-label={message}
+        // タップ端末向け：ホバーが無い環境ではこのトグルが唯一の開閉手段になる。
+        onClick={() => setOpen((prev) => !prev)}
+        className="focus-visible:ring-ring/50 rounded-full text-amber-600 outline-none focus-visible:ring-[3px] dark:text-amber-500"
+      >
+        <CircleAlert className="size-4" />
+      </TooltipTrigger>
+      <TooltipContent>{message}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function ResultPanel({ result }: ResultPanelProps) {
   const rows = buildRows(result);
 
@@ -130,19 +159,7 @@ export function ResultPanel({ result }: ResultPanelProps) {
             >
               <dt className="text-muted-foreground flex items-center gap-1 text-sm">
                 {row.label}
-                {row.warning !== undefined && (
-                  <Tooltip>
-                    {/* Trigger は button なのでホバーだけでなくキーボードフォーカスでも開く。
-                        アイコン単体では読み上げ名を持たないため aria-label に注意文を持たせる。 */}
-                    <TooltipTrigger
-                      aria-label={row.warning}
-                      className="focus-visible:ring-ring/50 rounded-full text-amber-600 outline-none focus-visible:ring-[3px] dark:text-amber-500"
-                    >
-                      <CircleAlert className="size-4" />
-                    </TooltipTrigger>
-                    <TooltipContent>{row.warning}</TooltipContent>
-                  </Tooltip>
-                )}
+                {row.warning !== undefined && <WarningIndicator message={row.warning} />}
               </dt>
               <dd className="text-sm font-medium tabular-nums whitespace-nowrap">{row.value}</dd>
             </div>
