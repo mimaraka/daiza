@@ -28,6 +28,7 @@ import {
 } from '@/components/preview3d/geometry3d';
 import type { Scene3dCamera, Scene3dGeometry } from '@/render/scene3d';
 import type { ArtworkTextures } from '@/render/texture3d';
+import type { Size } from '@/model/types';
 import { tiltPose } from '@/render/tilt3d';
 
 /** 背景の色。商品写真のスタジオを模した無彩色（SPEC「背景は単色」）。 */
@@ -65,12 +66,26 @@ export interface FigureSceneProps {
   exploded: boolean;
   /** 台座を強めの半透明にするか（スリット内のツメの収まりを透かして見る）。 */
   translucentBase: boolean;
+  /** 背面に保護用アクリル板を表示するか。 */
+  showBackPlate: boolean;
+  /** 背面アクリル板に貼る画像の canvas。null なら無地。 */
+  backTextureCanvas: HTMLCanvasElement | null;
+  /** 背面画像の実寸(mm)。null なら画像を貼らない。 */
+  backImageSizeMm: Size | null;
   /** 床へ貼るテクスチャ画像。null なら無地の床。 */
   floorImage: ImageBitmap | null;
   /** 床に実寸グリッドを表示するか。 */
   floorGrid: boolean;
   /** インクリメントすると初期構図へ戻る（視点リセット）。 */
   resetToken: number;
+  /** ドロップテストの進行状態。 */
+  dropPhase: 'idle' | 'dropping' | 'landed';
+  /** ドロップテストの高さ(mm)。 */
+  dropHeightMm: number;
+  /** ドロップ後の安定判定。未着陸なら null。 */
+  dropStable: boolean | null;
+  /** ドロップアニメーションが完了したときに呼ばれる。 */
+  onDropLanded: (stable: boolean) => void;
 }
 
 export function FigureScene({
@@ -81,9 +96,16 @@ export function FigureScene({
   tiltDeg,
   exploded,
   translucentBase,
+  showBackPlate,
+  backTextureCanvas,
+  backImageSizeMm,
   floorImage,
   floorGrid,
   resetToken,
+  dropPhase,
+  dropHeightMm,
+  dropStable,
+  onDropLanded,
 }: FigureSceneProps) {
   const { plate, base, artwork, tilt, explodeLiftMm, camera } = geometry;
   const controlsRef = useRef<ComponentRef<typeof OrbitControls> | null>(null);
@@ -94,19 +116,28 @@ export function FigureScene({
   const baseGeometry = useMemo(() => buildBaseGeometry(base), [base]);
   const artworkTexture = useMemo(() => buildTexture(textures.artwork), [textures.artwork]);
   const whiteTexture = useMemo(() => buildTexture(textures.white), [textures.white]);
+  const backTexture = useMemo(
+    () => (backTextureCanvas ? buildTexture(backTextureCanvas) : null),
+    [backTextureCanvas],
+  );
   useEffect(() => () => plateGeometry.dispose(), [plateGeometry]);
   useEffect(() => () => baseGeometry.dispose(), [baseGeometry]);
   useEffect(() => () => artworkTexture.dispose(), [artworkTexture]);
   useEffect(() => () => whiteTexture.dispose(), [whiteTexture]);
+  useEffect(() => () => backTexture?.dispose(), [backTexture]);
 
   // 板の裏面（奥）の Z。印刷レイヤはここからさらに奥へ 2 枚重ねる。
   const plateBackZ = plate.centerZMm - plate.thicknessMm / 2;
 
   // 傾けの姿勢（支点・回転軸・その方位の転倒角）。支点は凸包の支持直線＝実際に床へ触れている
   // 接触辺・接触点なので、円・楕円を斜めへ倒しても台座が浮かない（render/tilt3d）。
+  // ドロップテストが着地後に不安定だった場合は、最悪方位の支持辺を軸に 90° 倒れた姿勢へ切り替える。
   const pose = useMemo(
-    () => tiltPose(tilt, tiltAzimuthDeg, tiltDeg),
-    [tilt, tiltAzimuthDeg, tiltDeg],
+    () =>
+      dropPhase === 'landed' && dropStable === false
+        ? tiltPose(tilt, tiltAzimuthDeg, 90)
+        : tiltPose(tilt, tiltAzimuthDeg, tiltDeg),
+    [dropPhase, dropStable, tilt, tiltAzimuthDeg, tiltDeg],
   );
   const quaternion = useMemo(
     () => new Quaternion().setFromAxisAngle(new Vector3(...pose.axis), pose.angleRad),
@@ -144,12 +175,19 @@ export function FigureScene({
       />
 
       {/* 傾け：支持直線（支点）へ原点を移してから、その直線を軸に回し、元へ戻す。軸は方位に
-          応じて斜めを向くためオイラー角では表せず、軸角からクォータニオンを作る。 */}
-      <group position={[...pose.pivot]} quaternion={quaternion}>
-        <group position={[-pose.pivot[0], 0, -pose.pivot[2]]}>
-          {/* 台座。半透明トグル時のみ transmission をやめた素直なアルファ合成にして、
-              スリット内のツメが背後に透けて見えるようにする。 */}
-          <mesh geometry={baseGeometry} rotation={[-Math.PI / 2, 0, 0]}>
+          応じて斜めを向くためオイラー角では表せず、軸角からクォータニオンを作る。
+          ドロップテストはこのグループ全体を高さ方向に動かし、不安定なら倒れた姿勢へ切り替える。 */}
+      <DropTestGroup
+        phase={dropPhase}
+        heightMm={dropHeightMm}
+        stable={dropStable ?? true}
+        onLanded={onDropLanded}
+      >
+        <group position={[...pose.pivot]} quaternion={quaternion}>
+          <group position={[-pose.pivot[0], 0, -pose.pivot[2]]}>
+            {/* 台座。半透明トグル時のみ transmission をやめた素直なアルファ合成にして、
+                スリット内のツメが背後に透けて見えるようにする。 */}
+            <mesh geometry={baseGeometry} rotation={[-Math.PI / 2, 0, 0]}>
             {translucentBase ? (
               <meshPhysicalMaterial
                 color="#cfe3f5"
@@ -202,6 +240,40 @@ export function FigureScene({
                 metalness={0}
               />
             </mesh>
+
+            {/* 背面保護アクリル板。白版のすぐ後ろに、同じカットラインで板厚分奥へ向けて
+                配置する。解析には影響せず、視覚確認用の表示オプション。両面描画にして
+                後ろからも見えるようにする。 */}
+            {showBackPlate && (
+              <mesh
+                geometry={plateGeometry}
+                position={[0, 0, plateBackZ - INK_GAP_MM * 2]}
+                rotation={[0, Math.PI, 0]}
+              >
+                <AcrylicMaterial thicknessMm={plate.thicknessMm} side={DoubleSide} />
+              </mesh>
+            )}
+
+            {/* 背面画像：背面板の外側（奥面）に貼る。 */}
+            {showBackPlate && backTexture && backImageSizeMm && (
+              <mesh
+                position={[
+                  artwork.centerX,
+                  artwork.centerY,
+                  plateBackZ - INK_GAP_MM * 2 - plate.thicknessMm,
+                ]}
+              >
+                <planeGeometry args={[backImageSizeMm.width, backImageSizeMm.height]} />
+                <meshStandardMaterial
+                  map={backTexture}
+                  alphaTest={inkAlphaTest}
+                  alphaToCoverage
+                  side={DoubleSide}
+                  roughness={0.9}
+                  metalness={0}
+                />
+              </mesh>
+            )}
           </ExplodeGroup>
 
           {/* 支点のハイライト（接触辺、または接触点での接線）。ガイドは常時出さず、傾けている
@@ -215,6 +287,7 @@ export function FigureScene({
           )}
         </group>
       </group>
+      </DropTestGroup>
 
       <OrbitControls
         ref={controlsRef}
@@ -230,13 +303,85 @@ export function FigureScene({
   );
 }
 
+/** ドロップテストアニメーションの所要時間(秒)。 */
+const DROP_DURATION_SEC = 0.5;
+
+/**
+ * ドロップテスト：figure 全体を高さ方向に下げ、床に着いたら安定判定を親へ通知する。
+ *
+ * 不安定な構成では着地後に倒れた姿勢へ切り替わるが、その判定は静的転倒角
+ * （geometry.tilt.minTippingDeg）を使う。アニメーション中は on-demand 描画を
+ * invalidate() で自走させ、静止後は GPU を使わない。
+ */
+function DropTestGroup({
+  phase,
+  heightMm,
+  stable,
+  onLanded,
+  children,
+}: {
+  phase: 'idle' | 'dropping' | 'landed';
+  heightMm: number;
+  stable: boolean;
+  onLanded: (stable: boolean) => void;
+  children: ReactNode;
+}) {
+  const groupRef = useRef<Group>(null);
+  const progressRef = useRef(0);
+  const landedRef = useRef(false);
+  const invalidate = useThree((state) => state.invalidate);
+
+  useEffect(() => {
+    if (phase === 'dropping') {
+      progressRef.current = 0;
+      landedRef.current = false;
+      invalidate();
+    } else {
+      const group = groupRef.current;
+      if (group && group.position.y !== 0) {
+        group.position.y = 0;
+        invalidate();
+      }
+    }
+  }, [phase, heightMm, invalidate]);
+
+  useFrame((_, delta) => {
+    if (phase !== 'dropping') {
+      return;
+    }
+    const step = Math.min(delta, MAX_FRAME_DELTA_SEC) / DROP_DURATION_SEC;
+    const next = Math.min(1, progressRef.current + step);
+    progressRef.current = next;
+    const group = groupRef.current;
+    if (group) {
+      group.position.y = heightMm * (1 - easeInOutCubic(next));
+    }
+    if (next === 1) {
+      if (!landedRef.current) {
+        landedRef.current = true;
+        onLanded(stable);
+      }
+    } else {
+      invalidate();
+    }
+  });
+
+  return <group ref={groupRef}>{children}</group>;
+}
+
 /**
  * 透明アクリルの素材（板・台座で共有）。
  *
  * transmission（透過）で背後を屈折させ、環境マップの映り込みと弱い減衰色で「厚みのある
  * 透明樹脂」に見せる。thickness は減衰計算に使う実寸の厚み(mm)なので、板厚をそのまま渡す。
  */
-function AcrylicMaterial({ thicknessMm }: { thicknessMm: number }) {
+function AcrylicMaterial({
+  thicknessMm,
+  side,
+}: {
+  thicknessMm: number;
+  side?: 0 | 1 | 2;
+}) {
   return (
     <meshPhysicalMaterial
       color="#ffffff"
@@ -250,6 +395,7 @@ function AcrylicMaterial({ thicknessMm }: { thicknessMm: number }) {
       attenuationColor="#eaf4f6"
       attenuationDistance={150}
       envMapIntensity={1.1}
+      side={side ?? FrontSide}
     />
   );
 }

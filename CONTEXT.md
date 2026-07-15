@@ -54,11 +54,15 @@ When the active locale changes, the document element’s `lang` attribute is upd
 
 The product name “Daiza” is kept unchanged across locales. Descriptive text such as the header subtitle and the HTML `<title>` are translated.
 
+## Drop Test
+
+A 3D-preview visualization that lowers the figure from a user-adjustable height straight down onto the floor. After landing, the figure stays in the settled or fallen pose until the user resets it. The test fails when the figure’s center-of-mass projection lies outside the base footprint’s support polygon, and succeeds when it lies inside. The height control and trigger live inside the 3D preview control panel. It is a visual interpretation of the existing static stability check, not a new physical analysis.
+
+## Acrylic Back Plate
+
+A second clear acrylic plate shown in the 3D preview. It shares the same cutline as the front plate (including the neck-and-claw assembly) and sits flush behind the front plate, sandwiching the artwork and white print layers. Its thickness is the same as the front plate. It is controlled by a toggle in a new 'Preview / 表示' category in the left parameter panel and defaults to off. It is visual-only — it does not affect the image analysis, center of mass, stability angles, or drop test.
+
 ## URL Reflection
-
-The locale is not reflected in the URL. Persistence and default detection are handled by `localStorage` and the browser language only.
-
-## Missing Translation Fallback
 
 If the active locale does not contain a requested key, the translation function returns the English value. English is therefore the implicit fallback language at runtime.
 

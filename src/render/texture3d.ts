@@ -129,6 +129,21 @@ export function buildArtworkTextures(bitmap: ImageBitmap, alphaThreshold: number
   return { artwork, white };
 }
 
+/**
+ * 背面アクリル板に貼る画像テクスチャを作る。
+ *
+ * 前面の絵柄と同じく長辺を [[MAX_TEXTURE_SIZE]] へ抑え、元画像の α をそのまま残す。
+ * シルエットは three 側の alphaTest で切り抜く。
+ */
+export function buildBackTexture(bitmap: ImageBitmap): HTMLCanvasElement {
+  const scale = Math.min(1, MAX_TEXTURE_SIZE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const [canvas, ctx] = createCanvas(width, height);
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  return canvas;
+}
+
 /** 床タイルの内容。 */
 export interface FloorTextureOptions {
   /** テクスチャ画像が無いときのタイルの下地色（無地の床の色）。 */

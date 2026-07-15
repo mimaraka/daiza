@@ -109,6 +109,25 @@ function App() {
     [actions],
   );
 
+  // 背面アクリル板画像の読み込み口。PNG のみ。失敗は型付きエラーへ。
+  const handleBackImageFile = useCallback(
+    (file: File): void => {
+      void (async () => {
+        try {
+          const result = await loadPngFile(file);
+          if (result.ok) {
+            actions.setBackImage(result.image);
+          } else {
+            actions.failAnalysis(result.error);
+          }
+        } catch (cause) {
+          actions.failAnalysis(toUnexpectedError(cause));
+        }
+      })();
+    },
+    [actions],
+  );
+
   // SVG エクスポート：解析結果がある時のみ有効。undefined を渡すと LeftPanel の
   // ボタンが自動で無効化されるため、結果の有無で export ハンドラを出し分ける。
   const result = state.result;
@@ -202,6 +221,8 @@ function App() {
             parameters={state.parameters}
             onParametersChange={actions.updateParameters}
             onImageFile={handleImageFile}
+            backImage={state.backImage}
+            onBackImageFile={handleBackImageFile}
             baseShapeSource={state.baseShapeSource}
             onBaseShapeFile={handleBaseShapeFile}
           />
@@ -226,6 +247,8 @@ function App() {
             result={state.result}
             mmPerPixel={mmPerPixel}
             alphaThreshold={parameters.alphaThreshold}
+            showBackPlate={parameters.showBackPlate}
+            backImage={state.backImage}
             status={state.status}
             error={state.error}
             onImageFile={handleImageFile}

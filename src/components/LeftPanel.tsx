@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/accordion';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -35,7 +36,7 @@ import {
   PARAMETER_PRESETS,
   type ParameterConstraint,
 } from '@/model/state';
-import type { AnalysisParameters, BaseShape, BaseShapeSource } from '@/model/types';
+import type { AnalysisParameters, BaseShape, BaseShapeSource, FigureImage } from '@/model/types';
 
 /**
  * パラメータのカテゴリ（アコーディオンのセクション）。パラメータは十数個あり
@@ -51,6 +52,10 @@ export interface LeftPanelProps {
   onParametersChange: (parameters: Partial<AnalysisParameters>) => void;
   /** ユーザーが選択した PNG ファイルを通知する。未指定なら読み込みボタンは無効。 */
   onImageFile?: (file: File) => void;
+  /** 背面アクリル板用に読み込んだ画像。未読込なら null。 */
+  backImage?: FigureImage | null;
+  /** ユーザーが選択した背面画像ファイルを通知する。 */
+  onBackImageFile?: (file: File) => void;
   /** 読み込み済みの台座形状ソース（任意形状）。未読込なら null。 */
   baseShapeSource?: BaseShapeSource | null;
   /** ユーザーが選択した台座形状ソース（PNG / SVG）を通知する。 */
@@ -212,6 +217,8 @@ export function LeftPanel({
   parameters,
   onParametersChange,
   onImageFile,
+  backImage,
+  onBackImageFile,
   baseShapeSource,
   onBaseShapeFile,
 }: LeftPanelProps) {
@@ -258,6 +265,7 @@ export function LeftPanel({
   // ネイティブのファイル選択ダイアログは非表示 input を経由して開く。
   // 見た目は shadcn の Button に統一し、input 自体は UI から隠す。
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const backImageFileRef = useRef<HTMLInputElement>(null);
   const baseShapeFileRef = useRef<HTMLInputElement>(null);
 
   return (
@@ -266,7 +274,7 @@ export function LeftPanel({
         <CardHeader>
           <CardTitle>{t('leftPanel.imageCardTitle')}</CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="grid gap-4">
           <input
             ref={fileInputRef}
             type="file"
@@ -291,6 +299,51 @@ export function LeftPanel({
             <ImagePlus />
             {t('leftPanel.loadImage')}
           </Button>
+
+          {/* 両面アクリル：前面画像の次に置き、ON のときだけ背面画像を読み込める。 */}
+          <div className="flex items-start gap-2">
+            <Checkbox
+              id="show-back-plate"
+              checked={parameters.showBackPlate}
+              onCheckedChange={(checked) =>
+                onParametersChange({ showBackPlate: checked === true })
+              }
+            />
+            <Label htmlFor="show-back-plate" className="font-normal leading-none">
+              {t('leftPanel.doubleSidedAcrylic')}
+            </Label>
+          </div>
+
+          {parameters.showBackPlate && (
+            <div className="grid gap-2">
+              <input
+                ref={backImageFileRef}
+                type="file"
+                accept="image/png"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    onBackImageFile?.(file);
+                  }
+                  event.target.value = '';
+                }}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full"
+                disabled={!onBackImageFile}
+                onClick={() => backImageFileRef.current?.click()}
+              >
+                <ImagePlus />
+                {t('leftPanel.loadBackImage')}
+              </Button>
+              <p className="text-muted-foreground truncate text-xs">
+                {backImage ? backImage.fileName : t('leftPanel.backImageNotLoaded')}
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 

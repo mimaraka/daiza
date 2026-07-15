@@ -24,7 +24,7 @@ import { useTranslation } from '@/locales';
 import { cn } from '@/lib/utils';
 import type { AnalysisResult, FigureImage } from '@/model/types';
 import { CAMERA_FOV_DEG, buildScene3d } from '@/render/scene3d';
-import { buildArtworkTextures, inkAlphaTest } from '@/render/texture3d';
+import { buildArtworkTextures, buildBackTexture, inkAlphaTest } from '@/render/texture3d';
 import { tiltLimitDeg } from '@/render/tilt3d';
 import { formatAzimuth, normalizeAzimuth } from '@/utils/azimuth';
 import { clamp } from '@/utils/geometry';
@@ -52,9 +52,13 @@ export interface Preview3dProps {
   image: FigureImage;
   /** 不透明領域のしきい値。白版の 2 値化に解析と同じ判定を使うため受け取る。 */
   alphaThreshold: number;
+  /** 3D プレビューで背面のアクリル板を表示するか。 */
+  showBackPlate: boolean;
+  /** 背面アクリル板に貼る画像。null なら無地のクリア板。 */
+  backImage: FigureImage | null;
 }
 
-export default function Preview3d({ result, image, alphaThreshold }: Preview3dProps) {
+export default function Preview3d({ result, image, alphaThreshold, showBackPlate, backImage }: Preview3dProps) {
   const { t } = useTranslation();
 
   // 解析結果・画像が変わったときだけ作り直す（パラメータ変更のたびの再構築は避ける）。
@@ -62,6 +66,17 @@ export default function Preview3d({ result, image, alphaThreshold }: Preview3dPr
   const textures = useMemo(
     () => buildArtworkTextures(image.bitmap, alphaThreshold),
     [image.bitmap, alphaThreshold],
+  );
+  const backTextureCanvas = useMemo(
+    () => (backImage ? buildBackTexture(backImage.bitmap) : null),
+    [backImage],
+  );
+  const backImageSizeMm = useMemo(
+    () =>
+      backImage
+        ? { width: backImage.width * result.mmPerPixel, height: backImage.height * result.mmPerPixel }
+        : null,
+    [backImage, result.mmPerPixel],
   );
 
   // 傾けは「どちらへ（方位角）」「どれだけ（傾き量）」の 2 値で持つ。斜め方向でも支点と
@@ -76,6 +91,25 @@ export default function Preview3d({ result, image, alphaThreshold }: Preview3dPr
   const [floorGrid, setFloorGrid] = useState(true);
   const floor = useFloorTexture();
   const floorFileRef = useRef<HTMLInputElement>(null);
+
+  // ドロップテストの状態。高さ 0–50mm、既定 10mm。着地後は安定/転倒を表示する。
+  const [dropHeightMm, setDropHeightMm] = useState(10);
+  const [dropPhase, setDropPhase] = useState<'idle' | 'dropping' | 'landed'>('idle');
+  const [dropStable, setDropStable] = useState<boolean | null>(null);
+
+  const resetDrop = () => {
+    if (dropPhase !== 'idle') {
+      setDropPhase('idle');
+      setDropStable(null);
+    }
+  };
+  const startDrop = () => {
+    // 現在の傾き・方向で落下させる。傾きがその方位の転倒角を超えていれば転倒する。
+    const stable = tiltAmountDeg <= limitDeg;
+    setExploded(false);
+    setDropPhase('dropping');
+    setDropStable(stable);
+  };
 
   const { tilt } = geometry;
 
@@ -94,17 +128,20 @@ export default function Preview3d({ result, image, alphaThreshold }: Preview3dPr
   );
 
   const changeAzimuth = (next: number) => {
+    resetDrop();
     setTiltAzimuthDeg(snapAzimuth(next, snapTargets));
   };
 
   // 分解／組立は「傾き 0」の姿勢で再生する（合成姿勢を作らない。SPEC）。
   const toggleExploded = () => {
+    resetDrop();
     setTiltDeg(0);
     setExploded((v) => !v);
   };
 
   // 方向は保持したまま量だけ 0 へ戻す（同じ方位で倒し直せるようにする）。
   const resetTilt = () => {
+    resetDrop();
     setTiltDeg(0);
   };
 
@@ -129,9 +166,19 @@ export default function Preview3d({ result, image, alphaThreshold }: Preview3dPr
           tiltDeg={tiltAmountDeg}
           exploded={exploded}
           translucentBase={translucentBase}
+          showBackPlate={showBackPlate}
+          backTextureCanvas={backTextureCanvas}
+          backImageSizeMm={backImageSizeMm}
           floorImage={floor.image}
           floorGrid={floorGrid}
           resetToken={resetToken}
+          dropPhase={dropPhase}
+          dropHeightMm={dropHeightMm}
+          dropStable={dropStable}
+          onDropLanded={(stable) => {
+            setDropPhase('landed');
+            setDropStable(stable);
+          }}
         />
       </Canvas>
 
@@ -141,7 +188,10 @@ export default function Preview3d({ result, image, alphaThreshold }: Preview3dPr
           <Button
             variant="ghost"
             size="icon-sm"
-            onClick={() => setResetToken((v) => v + 1)}
+            onClick={() => {
+              resetDrop();
+              setResetToken((v) => v + 1);
+            }}
             title={t('preview3d.resetView')}
             aria-label={t('preview3d.resetView')}
           >
@@ -292,6 +342,55 @@ export default function Preview3d({ result, image, alphaThreshold }: Preview3dPr
               event.target.value = '';
             }}
           />
+        </div>
+
+        {/* ドロップテスト：figure を指定高さから落下させ、床に着いた後の安定を見る。 */}
+        <div className="mt-2 border-t pt-2">
+          <div className="flex items-baseline justify-between text-xs">
+            <span className="font-medium">{t('preview3d.dropTest')}</span>
+            <span className="tabular-nums">{dropHeightMm} mm</span>
+          </div>
+          <Slider
+            value={[dropHeightMm]}
+            min={0}
+            max={50}
+            step={1}
+            disabled={dropPhase === 'dropping' || dropPhase === 'landed'}
+            onValueChange={([next]) => {
+              if (next !== undefined) {
+                setDropHeightMm(next);
+              }
+            }}
+            aria-label={t('preview3d.dropHeight')}
+            className="mt-1"
+          />
+          <div className="mt-2 flex items-center gap-2">
+            {dropPhase === 'landed' ? (
+              <Button variant="secondary" size="sm" className="flex-1" onClick={resetDrop}>
+                {t('preview3d.resetDrop')}
+              </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="flex-1"
+                disabled={dropPhase === 'dropping'}
+                onClick={startDrop}
+              >
+                {t('preview3d.drop')}
+              </Button>
+            )}
+            {dropPhase === 'landed' && dropStable != null && (
+              <span
+                className={cn(
+                  'text-xs font-medium',
+                  dropStable ? 'text-green-600' : 'text-destructive',
+                )}
+              >
+                {dropStable ? t('preview3d.dropStable') : t('preview3d.dropUnstable')}
+              </span>
+            )}
+          </div>
         </div>
       </div>
     </div>

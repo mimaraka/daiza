@@ -83,6 +83,16 @@ export interface PreviewProps {
    * 解析と同一の判定でα を 2 値化するために要る。
    */
   alphaThreshold?: number;
+  /**
+   * 3D プレビューで背面のアクリル板を表示するか。表示のみのパラメータ。
+   * 省略時は false。
+   */
+  showBackPlate?: boolean;
+  /**
+   * 背面アクリル板に貼る画像。3D プレビューのみ使用する表示アセット。
+   * 省略時は null。
+   */
+  backImage?: FigureImage | null;
   /** 解析の進行状態。'analyzing' の間は解析中インジケータを重ねる。 */
   status?: AnalysisStatus;
   /**
@@ -100,6 +110,8 @@ export function Preview({
   result,
   mmPerPixel,
   alphaThreshold = 0,
+  showBackPlate = false,
+  backImage = null,
   status,
   error,
   onImageFile,
@@ -314,7 +326,13 @@ export function Preview({
                 </div>
               }
             >
-              <Preview3d result={result} image={image} alphaThreshold={alphaThreshold} />
+              <Preview3d
+                result={result}
+                image={image}
+                alphaThreshold={alphaThreshold}
+                showBackPlate={showBackPlate}
+                backImage={backImage}
+              />
             </Suspense>
           )}
 

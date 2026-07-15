@@ -255,6 +255,11 @@ export interface AnalysisParameters {
    * 方位角（右 0° → 前 90°）と同じ。
    */
   basePolygonRotationDeg: number;
+  /**
+   * 3D プレビューで背後のアクリル板（バックプレート）を表示するか。視覚確認用の
+   * 表示パラメータであり、解析・転倒角・エクスポートには影響しない。
+   */
+  showBackPlate: boolean;
 }
 
 /** 重心解析の結果。 */
