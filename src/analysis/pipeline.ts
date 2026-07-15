@@ -118,6 +118,10 @@ interface BinaryImage {
    * 変わらないようにする（analysis/scale の computeMmPerPixel）。
    */
   figureHeightPixels: number;
+  /** 絵柄（不透明領域）の上端行 Y。キーホルダー穴の上端余裕の基準。 */
+  minY: number;
+  /** 絵柄（不透明領域）の下端行 Y。 */
+  maxY: number;
 }
 
 /**
@@ -243,7 +247,9 @@ function binarize(
   // 上端・下端の「点間距離」（画素数 −1）。カットライン・台座・ルーラーが同じ点座標系で
   // 位置を測るため、こちらを基準にするとルーラーの読みとフィギュア高さが一致する。
   // 1 行しか無い退化画像でもゼロ除算しないよう下限 1 を置く。
-  const binary = rows ? { mask, figureHeightPixels: Math.max(1, rows.maxY - rows.minY) } : null;
+  const binary = rows
+    ? { mask, figureHeightPixels: Math.max(1, rows.maxY - rows.minY), minY: rows.minY, maxY: rows.maxY }
+    : null;
 
   if (memo) {
     memo.binaryKey = threshold;
@@ -439,6 +445,7 @@ function runKeychainAnalysis(
   const keychain = buildKeychainResult(
     contour,
     centroid,
+    common.binary.minY,
     params.keychainHoleDiameterMm,
     params.keychainHolePaddingMm,
     params.keychainHoleOffsetXMm,
