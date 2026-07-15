@@ -187,33 +187,11 @@ export function FigureScene({
 
   const shadowScaleMm = Math.max(base.widthMm, base.depthMm) * 2.6;
 
-  useEffect(() => {
-    console.log('[FigureScene] mounted', {
-      plateUuid: plateGeometry.uuid,
-      baseUuid: baseGeometry.uuid,
-      plateVertices: plateGeometry.attributes.position?.count,
-      baseVertices: baseGeometry.attributes.position?.count,
-      showBackPlate,
-    });
-    return () => {
-      console.log('[FigureScene] unmounted');
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // ConvexHullCollider の args は Float32Array を新規作成する。レンダーごとに作り直すと
   // コライダーが毎フレーム再生成されて重く・不安定になるため、ジオメトリが変わったときだけ
   // 作り直す。
-  const baseHullArgs = useMemo(() => {
-    const args = hullArgs(baseGeometry);
-    console.log('[FigureScene] base hull args', { uniqueVertices: args[0].length / 3 });
-    return args;
-  }, [baseGeometry]);
-  const plateHullArgs = useMemo(() => {
-    const args = hullArgs(plateGeometry);
-    console.log('[FigureScene] plate hull args', { uniqueVertices: args[0].length / 3 });
-    return args;
-  }, [plateGeometry]);
+  const baseHullArgs = useMemo(() => hullArgs(baseGeometry), [baseGeometry]);
+  const plateHullArgs = useMemo(() => hullArgs(plateGeometry), [plateGeometry]);
 
   // R3F の props として配列を渡すとき、レンダーごとに新しい配列を作らないよう固定する。
   // これによりメッシュ・コライダーの不要な更新を防ぐ。
@@ -463,7 +441,6 @@ function PhysicsFigure({
   // dropPhase が変わったときのモード切替・初期化。
   useEffect(() => {
     const body = rbRef.current;
-    console.log('[PhysicsFigure] dropPhase changed', { dropPhase, hasBody: !!body });
     if (!body) return;
 
     if (dropPhase === 'dropping') {
@@ -480,7 +457,6 @@ function PhysicsFigure({
       body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       body.setAngvel({ x: 0, y: 0, z: 0 }, true);
       body.wakeUp();
-      console.log('[PhysicsFigure] drop started', { startPos: startPos.toArray(), dropHeightMm: start.dropHeightMm });
     } else {
       body.setBodyType(RigidBodyType.KinematicPositionBased, true);
     }
@@ -537,7 +513,6 @@ function PhysicsFigure({
           rotation: new Quaternion(r.x, r.y, r.z, r.w),
         };
         const upWorld = new Vector3(0, 1, 0).applyQuaternion(finalPoseRef.current.rotation);
-        console.log('[PhysicsFigure] drop landed', { stable: upWorld.y > STABLE_UP_Y_THRESHOLD, upY: upWorld.y, dropTime: dropTimeRef.current });
         onDropLanded(upWorld.y > STABLE_UP_Y_THRESHOLD);
       } else if (speed < REST_SPEED_THRESHOLD && angSpeed < REST_ANGULAR_SPEED_THRESHOLD) {
         restFramesRef.current++;

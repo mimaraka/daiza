@@ -143,7 +143,6 @@ export function Preview({
   // 開始しておく。これにより「3D ボタンを押してから読み込み」による遅延・再マウントを減らす。
   useEffect(() => {
     if (result) {
-      console.log('[Preview] preloading 3D chunk');
       void import('@/components/preview3d/Preview3d');
     }
   }, [result]);
@@ -151,10 +150,6 @@ export function Preview({
   // 3D は解析結果が要る（立体を組み立てられない）。解析エラーで結果が消えた場合は
   // 自動的に 2D へ戻し、エラー表示が読める状態にする（SPEC「解析結果があるときのみ有効」）。
   const show3d = view3d && result != null && image != null;
-
-  useEffect(() => {
-    console.log('[Preview] 3D state changed', { view3d, hasActivated3d, show3d });
-  }, [view3d, hasActivated3d, show3d]);
 
   // 読み込みハンドラが無ければ D&D は無効。ハンドラの有無で振る舞いを分ける。
   const dropEnabled = Boolean(onImageFile);
@@ -530,7 +525,6 @@ export function Preview({
               variant="ghost"
               size="icon-sm"
               onClick={() => {
-                console.log('[Preview] 3D toggle clicked');
                 setView3d((v) => !v);
                 setHasActivated3d(true);
               }}

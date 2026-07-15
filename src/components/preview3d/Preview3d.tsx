@@ -61,27 +61,8 @@ export interface Preview3dProps {
 export default function Preview3d({ result, image, alphaThreshold, showBackPlate, backImage }: Preview3dProps) {
   const { t } = useTranslation();
 
-  useEffect(() => {
-    console.log('[Preview3d] mounted', { imageId: image.id, showBackPlate });
-    return () => {
-      console.log('[Preview3d] unmounted');
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    console.log('[Preview3d] props changed', {
-      imageId: image.id,
-      showBackPlate,
-      backImage: backImage?.id ?? null,
-    });
-  }, [image.id, showBackPlate, backImage]);
-
   // 解析結果・画像が変わったときだけ作り直す（パラメータ変更のたびの再構築は避ける）。
-  const geometry = useMemo(() => {
-    console.log('[Preview3d] building geometry');
-    return buildScene3d(result);
-  }, [result]);
+  const geometry = useMemo(() => buildScene3d(result), [result]);
   const textures = useMemo(
     () => buildArtworkTextures(image.bitmap, alphaThreshold),
     [image.bitmap, alphaThreshold],
@@ -111,25 +92,16 @@ export default function Preview3d({ result, image, alphaThreshold, showBackPlate
   const floor = useFloorTexture();
   const floorFileRef = useRef<HTMLInputElement>(null);
 
-  // React StrictMode では開発時にコンポーネントが即座に mount → unmount → mount され、
-  // WebGL コンテキストが作成直後に破棄されて「Context Lost」になる。それを避けるため、
-  // 初回 render では Canvas を作らず、さらに Rapier WASM を先に初期化してから生成する。
-  // これにより <Physics> の suspend が Canvas 生成後に発生し、プレビューがアンマウント
-  // されることも防ぐ。
+  // Rapier WASM を先に初期化してから <Canvas> を生成する。これにより <Physics> の
+  // suspend が Canvas 生成後に発生し、プレビューがアンマウントされるのを防ぐ。
   const [canvasReady, setCanvasReady] = useState(false);
   useEffect(() => {
     let canceled = false;
-    console.log('[Preview3d] initializing Rapier + scheduling Canvas');
     void (async () => {
-      try {
-        const r = await import('@dimforge/rapier3d-compat');
-        await r.init();
-        if (!canceled) {
-          console.log('[Preview3d] Rapier ready, creating Canvas');
-          setCanvasReady(true);
-        }
-      } catch (err) {
-        console.error('[Preview3d] Rapier initialization failed', err);
+      const r = await import('@dimforge/rapier3d-compat');
+      await r.init();
+      if (!canceled) {
+        setCanvasReady(true);
       }
     })();
     return () => {
@@ -211,20 +183,6 @@ export default function Preview3d({ result, image, alphaThreshold, showBackPlate
             near: CAMERA_NEAR_MM,
             far: CAMERA_FAR_MM,
             position: [...geometry.camera.position],
-          }}
-          onCreated={({ gl }) => {
-            const canvas = gl.domElement;
-            console.log('[Preview3d] Canvas/WebGL context created', {
-              renderer: gl.constructor.name,
-              width: canvas.width,
-              height: canvas.height,
-            });
-            canvas.addEventListener('webglcontextlost', (event) => {
-              console.error('[Preview3d] WebGL context lost', event);
-            });
-            canvas.addEventListener('webglcontextrestored', (event) => {
-              console.log('[Preview3d] WebGL context restored', event);
-            });
           }}
         >
           {/* <Physics> が Rapier WASM を suspend しても Canvas ごとアンマウントしないよう、
