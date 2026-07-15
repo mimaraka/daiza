@@ -154,11 +154,12 @@ export async function generateMockup3dPng(
   let backImagePlane: import('three').Mesh | null = null;
   let backTexture: import('three').CanvasTexture | null = null;
   if (showBackPlate) {
+    // 白版・背面板・背面画像が同じ深度を夺い合わないよう、inkGap 刻みで奥へずらす。
     const backPlate = new THREE.Mesh(
       plateGeometry,
       acrylicMaterial(geometry.plate.thicknessMm, THREE),
     );
-    backPlate.position.z = plateBackZ - inkGap * 2 - geometry.plate.thicknessMm;
+    backPlate.position.z = plateBackZ - inkGap * 3 - geometry.plate.thicknessMm;
     backPlateMesh = backPlate;
     scene.add(backPlate);
 
@@ -177,7 +178,7 @@ export async function generateMockup3dPng(
       plane.position.set(
         geometry.artwork.centerX,
         geometry.artwork.centerY,
-        plateBackZ - inkGap * 2 - geometry.plate.thicknessMm,
+        plateBackZ - inkGap * 4 - geometry.plate.thicknessMm,
       );
       backImagePlane = plane;
       scene.add(plane);

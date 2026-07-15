@@ -198,8 +198,9 @@ export function FigureScene({
   const gravity = useMemo(() => [0, -GRAVITY_MM_PER_SEC2, 0] as [number, number, number], []);
   const baseMeshRotation = useMemo(() => [-Math.PI / 2, 0, 0] as [number, number, number], []);
   const plateMeshPosition = useMemo(() => [0, 0, plateBackZ] as [number, number, number], [plateBackZ]);
+  // 白版・背面板・背面画像が同じ深度を夺い合わないよう、INK_GAP 刻みで奥へずらす。
   const backPlatePosition = useMemo(
-    () => [0, 0, plateBackZ - INK_GAP_MM * 2 - plate.thicknessMm] as [number, number, number],
+    () => [0, 0, plateBackZ - INK_GAP_MM * 3 - plate.thicknessMm] as [number, number, number],
     [plateBackZ, plate.thicknessMm],
   );
   const floorColliderArgs = useMemo(() => [1000, 0.1, 1000] as [number, number, number], []);
@@ -317,7 +318,7 @@ export function FigureScene({
                 position={[
                   artwork.centerX,
                   artwork.centerY,
-                  plateBackZ - INK_GAP_MM * 2 - plate.thicknessMm,
+                  plateBackZ - INK_GAP_MM * 4 - plate.thicknessMm,
                 ]}
               >
                 <planeGeometry args={[backImageSizeMm.width, backImageSizeMm.height]} />

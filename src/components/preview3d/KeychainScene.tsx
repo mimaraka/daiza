@@ -104,7 +104,9 @@ export function KeychainScene({
   useEffect(() => () => metalMaterial.dispose(), [metalMaterial]);
 
   const backPlateZ = -INK_GAP_MM * 2;
-  const backImageZ = backPlateZ - plate.thicknessMm;
+  // 白版・背面板・背面画像が同じ深度を夺い合わないよう、INK_GAP 刻みで奥へずらす。
+  const backPlatePositionZ = backPlateZ - INK_GAP_MM - plate.thicknessMm;
+  const backImageZ = backPlateZ - INK_GAP_MM * 2 - plate.thicknessMm;
 
   const controlsRef = useRef<ComponentRef<typeof OrbitControls> | null>(null);
 
@@ -257,10 +259,7 @@ export function KeychainScene({
             {/* 背面保護アクリル板。白版のすぐ後ろに同じカットライン・同じ向きで配置し、
                 前から見たとき輪郭が前面板と重なるようにする（リング穴も一直線に通る）。 */}
             {showBackPlate && (
-              <mesh
-                geometry={plateGeometry}
-                position={[0, 0, backPlateZ - plate.thicknessMm]}
-              >
+              <mesh geometry={plateGeometry} position={[0, 0, backPlatePositionZ]}>
                 <AcrylicMaterial thicknessMm={plate.thicknessMm} side={DoubleSide} />
               </mesh>
             )}
