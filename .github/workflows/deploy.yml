@@ -41,7 +41,8 @@ jobs:
         run: npm run build
 
       - name: Create CNAME file
-        run: echo "daiza.kerlos.in.th" > ./dist/CNAME
+        if: ${{ secrets.CNAME != '' }}
+        run: echo "${{ secrets.CNAME }}" > ./dist/CNAME
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
