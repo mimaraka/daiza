@@ -21,6 +21,7 @@
 // しか描かないため、半透明のグリッド面はアクリル板・台座越しに消えてしまう（＝台座の footprint
 // だけ格子が抜ける）。床の map に焼けば床は不透明のままなので、アクリル越しでも格子が見える。
 
+import type { Point } from '@/model/types';
 import { alphaCutoff } from '@/utils/image';
 
 /** テクスチャの長辺の上限(px)。 */
@@ -97,7 +98,42 @@ function createCanvas(
  *    のままだと、アクリル板越しに絵柄が一切見えなくなる。合成して不透明にし、シルエットは
  *    alphaTest（[[inkAlphaTest]]）で切り抜くことで、この制約を正面から満たす。
  */
-export function buildArtworkTextures(bitmap: ImageBitmap, alphaThreshold: number): ArtworkTextures {
+export interface ArtworkTextureHoleMask {
+  /** 穴中心（元画像ピクセル座標）。 */
+  readonly center: Point;
+  /** 穴半径(mm)。 */
+  readonly radiusMm: number;
+  /** mm/px。 */
+  readonly mmPerPixel: number;
+}
+
+/**
+ * 白版・絵柄テクスチャから穴部分をくり抜く。
+ *
+ * キーホルダーのリング穴には印刷レイヤが入らないため、テクスチャ上で該当部分を
+ * 透明にする。
+ */
+function maskHoleInCanvas(
+  ctx: CanvasRenderingContext2D,
+  hole: ArtworkTextureHoleMask,
+  scale: number,
+): void {
+  const r = (hole.radiusMm / hole.mmPerPixel) * scale;
+  const cx = hole.center.x * scale;
+  const cy = hole.center.y * scale;
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+export function buildArtworkTextures(
+  bitmap: ImageBitmap,
+  alphaThreshold: number,
+  hole?: ArtworkTextureHoleMask,
+): ArtworkTextures {
   const scale = Math.min(1, MAX_TEXTURE_SIZE / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));
@@ -119,14 +155,35 @@ export function buildArtworkTextures(bitmap: ImageBitmap, alphaThreshold: number
     }
   }
   whiteCtx.putImageData(mask, 0, 0);
+  if (hole) {
+    maskHoleInCanvas(whiteCtx, hole, scale);
+  }
 
   // 絵柄：白版を下敷きにして絵柄を重ねる（＝実物の印刷順）。白版の範囲は α=1 になり、
   // その外側は元の α（＝しきい値以下）のまま残るので、alphaTest で同じシルエットに切り抜ける。
   const [artwork, artworkCtx] = createCanvas(width, height);
   artworkCtx.drawImage(white, 0, 0);
   artworkCtx.drawImage(bitmap, 0, 0, width, height);
+  if (hole) {
+    maskHoleInCanvas(artworkCtx, hole, scale);
+  }
 
   return { artwork, white };
+}
+
+/**
+ * 背面アクリル板に貼る画像テクスチャを作る。
+ *
+ * 前面の絵柄と同じく長辺を [[MAX_TEXTURE_SIZE]] へ抑え、元画像の α をそのまま残す。
+ * シルエットは three 側の alphaTest で切り抜く。
+ */
+export function buildBackTexture(bitmap: ImageBitmap): HTMLCanvasElement {
+  const scale = Math.min(1, MAX_TEXTURE_SIZE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const [canvas, ctx] = createCanvas(width, height);
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  return canvas;
 }
 
 /** 床タイルの内容。 */

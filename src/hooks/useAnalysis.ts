@@ -265,7 +265,6 @@ export function useAnalysis(state: AppState, actions: AppStateActions): void {
       }
       try {
         const outcome = runAnalysis(
-          image,
           phase1Local.value,
           parameters,
           baseShapeSource,

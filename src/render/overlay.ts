@@ -10,7 +10,7 @@
 // SVG 側の座標変換だけで完結し、本モジュールは影響を受けない。
 
 import { slotJunctionCorners } from '@/analysis/slot';
-import type { AnalysisResult, Point } from '@/model/types';
+import type { AnalysisResult, KeychainResult, Point } from '@/model/types';
 
 /** 外形（半透明の塗り）。ピクセル座標の頂点列。 */
 export interface OverlayPolygon {
@@ -49,34 +49,43 @@ export interface OverlaySegment {
   readonly to: Point;
 }
 
+/** キーホルダー穴（赤い円）。 */
+export interface OverlayHole {
+  readonly role: 'keychainHole';
+  readonly center: Point;
+  readonly radius: number;
+}
+
 /**
  * プレビューへ重ねる図形一式。
  * 描画層はこの構造体の各要素を role に応じたスタイルで SVG 化するだけでよい。
+ * baseFigure / keychain のどちらかによって、存在する要素が変わる。
  */
 export interface OverlayShapes {
   readonly contour: OverlayPolygon;
   readonly centroid: OverlayPoint;
-  /** 差込部の首部（幅=首部幅、カットライン下辺〜台座上面）。 */
-  readonly neck: OverlayRect;
-  /** 差込部のツメ（幅=差込口幅、台座上面から板厚ぶん下）。 */
-  readonly tab: OverlayRect;
-  readonly base: OverlayRect;
-  readonly support: OverlaySegment;
-  readonly plumb: OverlaySegment;
+  /** 差込部の首部（幅=首部幅、カットライン下辺〜台座上面）。baseFigure のみ。 */
+  readonly neck?: OverlayRect;
+  /** 差込部のツメ（幅=差込口幅、台座上面から板厚ぶん下）。baseFigure のみ。 */
+  readonly tab?: OverlayRect;
+  /** 台座（緑矩形）。baseFigure のみ。 */
+  readonly base?: OverlayRect;
+  /** 支持範囲（オレンジ線）。baseFigure のみ。 */
+  readonly support?: OverlaySegment;
+  /** 重心からの鉛直線（点線）。baseFigure のみ。 */
+  readonly plumb?: OverlaySegment;
+  /** キーホルダー穴。keychain のみ。 */
+  readonly hole?: OverlayHole;
 }
 
 /**
- * 解析結果からオーバーレイ図形一式を構築する。
- *
- * mm 座標で保持している値（台座幅・支持範囲）は mmPerPixel で割ってピクセル座標へ
- * 戻す。支持範囲・台座・鉛直線は**台座上面**（カットライン最下端 + 持ち上げ量）を共通の
- * ベースラインとして配置し、重心の鉛直線をそこまで下ろすことで「重心の真下が支持範囲内か」
- * を目視できるようにする。画像下端ではなく台座上面を基準にするのは、カットライン余白で
- * 外形が画像下端より下へ広がっても板が台座に潜り込まないようにするため（SPEC「アクリル板と
- * 台座の上下関係」）。
+ * baseFigure モードのオーバーレイ図形を構築する。
  */
-export function buildOverlayShapes(result: AnalysisResult): OverlayShapes {
+function buildBaseOverlayShapes(result: AnalysisResult): OverlayShapes {
   const { mmPerPixel, contour, centroid, slot, base } = result;
+  if (!slot || !base) {
+    throw new Error('buildBaseOverlayShapes requires slot/base result');
+  }
 
   // 支持範囲・台座・鉛直線の基準となる台座上面（＝首部下端＝ツメ上端）。
   const baselineY = slot.baseTopYPixel;
@@ -102,10 +111,6 @@ export function buildOverlayShapes(result: AnalysisResult): OverlayShapes {
   // 重心高さ由来の大きな値がそのまま縦長の帯になって形状を覆い隠すため使わない。
   // 縦をツメ深さに揃えることで、ツメが台座を貫通していない（＝ちょうど収まる）ことも
   // そのまま目で確認できる。
-  //
-  // 横幅は台座形状によらず footprint のバウンディングボックス幅（＝凸包の左右端＝支持範囲の
-  // オレンジ線と一致）。奥行方向の形状は前面図に現れないため、上面図インセット（render/topView）で
-  // 確認する（SPEC「台座（緑矩形）の縦の長さ」）。
   const baseWidthPixel = base.widthMm / mmPerPixel;
   const baseRect: OverlayRect = {
     role: 'base',
@@ -138,4 +143,36 @@ export function buildOverlayShapes(result: AnalysisResult): OverlayShapes {
     support,
     plumb,
   };
+}
+
+/**
+ * keychain モードのオーバーレイ図形を構築する。
+ * contour は既に回転済みなので、そのまま描画する。
+ */
+function buildKeychainOverlayShapes(
+  result: AnalysisResult,
+  keychain: KeychainResult,
+): OverlayShapes {
+  return {
+    contour: { role: 'contour', points: result.contour, sharpCorners: [] },
+    centroid: { role: 'centroid', center: result.centroid.pixel },
+    hole: {
+      role: 'keychainHole',
+      center: keychain.holeCenterPixel,
+      radius: keychain.holeRadiusMm / result.mmPerPixel,
+    },
+  };
+}
+
+/**
+ * 解析結果からオーバーレイ図形一式を構築する。
+ *
+ * baseFigure / keychain のどちらかによって返す図形が異なる。
+ * keychain では contour が既に回転済みなので、そのまま描画する。
+ */
+export function buildOverlayShapes(result: AnalysisResult): OverlayShapes {
+  if (result.keychain) {
+    return buildKeychainOverlayShapes(result, result.keychain);
+  }
+  return buildBaseOverlayShapes(result);
 }
