@@ -1,5 +1,7 @@
 # Daiza
 
+**[English](README.en.md) · [ไทย](README.th.md) · 日本語**
+
 PNG画像からアクリルフィギュアの重心を解析し、**差込口の位置**と**台座サイズ**を自動計算するWebアプリです。カットライン（アクリル外形）と台座の図面を、実寸(mm)座標系のSVGとして書き出せます。
 
 **公開URL: https://mimaraka.github.io/daiza/**

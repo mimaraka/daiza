@@ -112,6 +112,40 @@ export interface Scene3dGeometry {
 }
 
 /**
+ * キーホルダーモードの 3D シーン幾何。
+ *
+ * 座標系の原点はクラスプ（固定端）の先端、Y は上向き正、Z は前向き正。
+ * アクリル板は穴中心を基点として下に吊り下がり、クラスプからチェーン・リングを経て
+ * 板の穴に繋がる。
+ */
+export interface KeychainScene3dGeometry {
+  /** 板のカットライン（穴中心を原点としたシーン座標 mm）。 */
+  readonly plate: {
+    readonly outline: readonly Point[];
+    readonly thicknessMm: number;
+  };
+  /** 絵柄・白版を貼る矩形（穴中心を原点としたシーン座標 mm）。 */
+  readonly artwork: Scene3dRect;
+  /** リング穴の半径(mm)。 */
+  readonly holeRadiusMm: number;
+  /** チェーンの長さ（クラスプ下端からリング中心まで、mm）。 */
+  readonly chainLengthMm: number;
+  /** リングの外径半径(mm)。 */
+  readonly ringRadiusMm: number;
+  /** クラスプの全長(mm)。 */
+  readonly claspLengthMm: number;
+  /** 初期構図。 */
+  readonly camera: Scene3dCamera;
+}
+
+/** キーホルダーのチェーン長さ。見た目のバランスから 28mm を既定とする。 */
+const KEYCHAIN_CHAIN_LENGTH_MM = 28;
+/** キーリングの外径半径。 */
+const KEYCHAIN_RING_RADIUS_MM = 3;
+/** クラスプの全長。 */
+const KEYCHAIN_CLASP_LENGTH_MM = 12;
+
+/**
  * 解析結果を 3D シーンの幾何へ変換する。
  *
  * 板の外形には、プレビュー（overlay）・エクスポート（geometry）と**同一の**カットラインを
@@ -123,6 +157,9 @@ export interface Scene3dGeometry {
  */
 export function buildScene3d(result: AnalysisResult): Scene3dGeometry {
   const { mmPerPixel, imageSize, contour, centroid, slot, base, stability } = result;
+  if (!slot || !base || !stability) {
+    throw new Error('buildScene3d requires slot/base/stability result');
+  }
 
   // 板厚。板・台座・ツメ深さで共通の値（SPEC）。
   const thicknessMm = slot.tabDepthMm;
@@ -208,6 +245,9 @@ export function buildScene3d(result: AnalysisResult): Scene3dGeometry {
  * 落として姿勢だけは成り立たせる。
  */
 function hullOf(base: AnalysisResult['base']): readonly Point[] {
+  if (!base) {
+    throw new Error('buildScene3d requires base result');
+  }
   const hull = base.footprint.hull;
   if (hull.length >= 3) {
     return hull;
@@ -248,6 +288,99 @@ function cameraFrame(plate: Scene3dPlate, baseWidthMm: number): Scene3dCamera {
   const [dx, dy, dz] = CAMERA_DIRECTION;
   const length = Math.hypot(dx, dy, dz);
   const target: Vec3 = [0, heightMm * 0.45, 0];
+
+  return {
+    position: [
+      target[0] + (dx / length) * distanceMm,
+      target[1] + (dy / length) * distanceMm,
+      target[2] + (dz / length) * distanceMm,
+    ],
+    target,
+  };
+}
+
+/**
+ * キーホルダーモードの 3D シーン幾何を構築する。
+ *
+ * カットラインは既に穴中心まわりに回転済みなので、穴中心をシーン原点に置き、
+ * そのまま板を吊り下げる形で配置する。絵柄は原画像を回転前の向きのまま
+ * アクリル板に印刷したものとして、板と一体で回転する。
+ */
+export function buildKeychainScene3d(
+  result: AnalysisResult,
+  thicknessMm: number,
+): KeychainScene3dGeometry {
+  const { mmPerPixel, imageSize, contour, keychain } = result;
+  if (!keychain) {
+    throw new Error('buildKeychainScene3d requires keychain result');
+  }
+
+  const holePx = keychain.holeCenterPixel;
+
+  // 穴中心を原点とするシーン座標（Y 上向き正）へ写す。
+  const toScene = (p: Point): Point => ({
+    x: (p.x - holePx.x) * mmPerPixel,
+    y: -(p.y - holePx.y) * mmPerPixel,
+  });
+
+  const outline = closedCurvePolyline(contour, CURVE_TOLERANCE_MM / mmPerPixel, {
+    sharpCorners: [],
+  }).map(toScene);
+
+  // 絵柄矩形：画像左上をシーン座標へ写し、中心を求める。
+  const imageWidthMm = imageSize.width * mmPerPixel;
+  const imageHeightMm = imageSize.height * mmPerPixel;
+  const imageTopLeft = toScene({ x: 0, y: 0 });
+
+  let minY = 0;
+  let maxY = 0;
+  let minX = 0;
+  let maxX = 0;
+  for (const p of outline) {
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+  }
+
+  return {
+    plate: { outline, thicknessMm },
+    artwork: {
+      centerX: imageTopLeft.x + imageWidthMm / 2,
+      centerY: imageTopLeft.y - imageHeightMm / 2,
+      width: imageWidthMm,
+      height: imageHeightMm,
+    },
+    holeRadiusMm: keychain.holeRadiusMm,
+    chainLengthMm: KEYCHAIN_CHAIN_LENGTH_MM,
+    ringRadiusMm: KEYCHAIN_RING_RADIUS_MM,
+    claspLengthMm: KEYCHAIN_CLASP_LENGTH_MM,
+    camera: keychainCameraFrame(minX, maxX, minY),
+  };
+}
+
+/**
+ * キーホルダー全体が収まる初期構図。
+ *
+ * クラスプ先端が原点、板が下に下がっている。全体の高さにチェーン長を含めて
+ * フィットさせ、正面やや斜め上から見る。
+ */
+function keychainCameraFrame(
+  minXMm: number,
+  maxXMm: number,
+  minYMm: number,
+): Scene3dCamera {
+  const widthMm = Math.max(maxXMm - minXMm, 1);
+  const totalHeightMm = Math.max(
+    KEYCHAIN_CLASP_LENGTH_MM + KEYCHAIN_CHAIN_LENGTH_MM - minYMm,
+    1,
+  );
+  const radiusMm = 0.5 * Math.hypot(widthMm, totalHeightMm);
+  const distanceMm = (radiusMm / Math.tan(degToRad(CAMERA_FOV_DEG) / 2)) * CAMERA_FIT_MARGIN;
+
+  const [dx, dy, dz] = CAMERA_DIRECTION;
+  const length = Math.hypot(dx, dy, dz);
+  const target: Vec3 = [0, minYMm * 0.45, 0];
 
   return {
     position: [

@@ -7,6 +7,7 @@
 // 幾何は render/topView（純粋ロジック）が台座ローカル座標(mm)で決める。SVG の y は下向きなので、
 // その座標をそのまま viewBox に載せるだけで「前（+Z）が下」（エクスポートの上面図と同じ規約）になる。
 
+import { useTranslation } from '@/locales';
 import type { TopViewShapes } from '@/render/topView';
 
 /** インセットの一辺(px)。プレビューを覆い隠さず、形状と重心の関係が読める大きさ。 */
@@ -22,6 +23,7 @@ export interface TopViewProps {
 }
 
 export function TopView({ shapes }: TopViewProps) {
+  const { t } = useTranslation();
   const { viewBox, slot, centroid, worst } = shapes;
 
   // mm → 画面 px のスケール。線幅・マーカーはこれで割って画面上サイズを一定にする。
@@ -91,7 +93,7 @@ export function TopView({ shapes }: TopViewProps) {
         />
       </svg>
       <p className="text-muted-foreground mt-0.5 text-center text-[10px] tabular-nums">
-        上面図（前が下）／最小 {shapes.worstAngleDeg.toFixed(1)}°
+        {t('topView.caption', { angle: shapes.worstAngleDeg.toFixed(1) })}
       </p>
     </div>
   );

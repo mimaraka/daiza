@@ -23,7 +23,7 @@
 // クラッシュさせず、UI がメッセージ表示へ落とせる形（AnalysisError）で失敗を伝える。
 
 import { computeBase, computeBaseTopYPixel } from '@/analysis/base';
-import { polygonCentroid, toCentroid } from '@/analysis/centroid';
+import { polygonCentroid, toCentroid, type CentroidPixel } from '@/analysis/centroid';
 import {
   attachSlotBody,
   buildCutlineMask,
@@ -33,6 +33,7 @@ import {
 } from '@/analysis/contour';
 import type { DilatedMask } from '@/analysis/distance';
 import { buildFootprint } from '@/analysis/footprint';
+import { buildKeychainResult } from '@/analysis/keychain';
 import { computeDpi, computeMmPerPixel, computePhysicalSize } from '@/analysis/scale';
 import { findSlot } from '@/analysis/slot';
 import { computeStability } from '@/analysis/stability';
@@ -42,11 +43,12 @@ import type {
   AnalysisParameters,
   AnalysisResult,
   BaseShapeSource,
+  Centroid,
   Contour,
-  FigureImage,
   Size,
   SlotResult,
 } from '@/model/types';
+
 import {
   extractAlphaPlane,
   isAcrylicAlpha,
@@ -65,23 +67,10 @@ type PipelineErrorKind = Extract<
   | 'transparentImage'
   | 'scaleCalculationFailed'
   | 'slotPlacementFailed'
+  | 'holePlacementFailed'
   | 'baseShapeFailed'
   | 'baseCalculationFailed'
 >;
-
-/** UI へ提示するエラーメッセージ（日本語）。 */
-const ERROR_MESSAGES: Record<PipelineErrorKind, string> = {
-  transparentImage:
-    'アクリル領域が見つからないため解析できません。アルファ閾値を下げる、または透明でないPNG画像を選択してください。',
-  scaleCalculationFailed:
-    'フィギュア高さが小さすぎます。フィギュア高さは「接地面（台座底面）からカットライン（絵柄＋余白）の上端まで」の全高です。カットライン余白×2＋アクリル板の持ち上げ量＋板厚 より大きい値を指定してください。',
-  slotPlacementFailed:
-    '差込部（首部・ツメ）を配置できません。首部の左右端が板からはみ出している可能性があります。首部幅を小さくする、差込口オフセットを小さくする、などパラメータを見直してください。',
-  baseShapeFailed:
-    '台座形状が利用できません。任意形状を選んでいる場合は台座形状ソース（PNG / SVG）を読み込んでください。台座の寸法（幅・奥行・直径）が正しいかも確認してください。',
-  baseCalculationFailed:
-    '台座サイズを計算できません。指定した台座では重心を支えられない、またはスリット（幅=差込口幅・開口=板厚）が台座の縁を割っている可能性があります。台座を大きくする、差込口オフセット（左右・前後）を小さくする、などパラメータを見直してください。',
-};
 
 /** 解析の成否。成功なら結果一式、失敗なら型付きエラー。 */
 export type AnalysisOutcome =
@@ -129,6 +118,10 @@ interface BinaryImage {
    * 変わらないようにする（analysis/scale の computeMmPerPixel）。
    */
   figureHeightPixels: number;
+  /** 絵柄（不透明領域）の上端行 Y。キーホルダー穴の上端余裕の基準。 */
+  minY: number;
+  /** 絵柄（不透明領域）の下端行 Y。 */
+  maxY: number;
 }
 
 /**
@@ -146,7 +139,7 @@ export interface ImagePixels {
 
 /** 型付きエラーを組み立てる小ヘルパー。 */
 function makeError(kind: PipelineErrorKind): AnalysisError {
-  return { kind, message: ERROR_MESSAGES[kind] };
+  return { kind };
 }
 
 /** エラー結果（第 2 相用）を組み立てる小ヘルパー。 */
@@ -254,7 +247,9 @@ function binarize(
   // 上端・下端の「点間距離」（画素数 −1）。カットライン・台座・ルーラーが同じ点座標系で
   // 位置を測るため、こちらを基準にするとルーラーの読みとフィギュア高さが一致する。
   // 1 行しか無い退化画像でもゼロ除算しないよう下限 1 を置く。
-  const binary = rows ? { mask, figureHeightPixels: Math.max(1, rows.maxY - rows.minY) } : null;
+  const binary = rows
+    ? { mask, figureHeightPixels: Math.max(1, rows.maxY - rows.minY), minY: rows.minY, maxY: rows.maxY }
+    : null;
 
   if (memo) {
     memo.binaryKey = threshold;
@@ -359,32 +354,34 @@ function buildSlottedCutline(
  *
  * image は寸法だけを使うため、Worker 側は ImageData を持たない {width, height} でも呼べる。
  */
-export function runAnalysis(
-  image: Pick<FigureImage, 'width' | 'height'>,
+/**
+ * カットライン生成までの共通前段：二値化 → 膨張マスク → 輪郭抽出 → 重心。
+ * baseFigure / keychain の両方で使う。失敗時は null を返し、呼び出し側がエラー種別を決める。
+ */
+function buildContourAndCentroid(
   imageAnalysis: ImageAnalysis,
   params: AnalysisParameters,
-  baseShapeSource: BaseShapeSource | null,
   cutlineMemo?: CutlineMemo,
-): AnalysisOutcome {
-  const { width, height } = image;
-
-  // 不透明領域の確定。しきい値が高すぎてアクリル画素が 1 つも残らなければ、以降の基準
-  // （絵柄の高さ・重心・差込口）が取れないため透明画像と同じ扱いで弾く。
+):
+  | {
+      contour: Contour;
+      centroidPixel: CentroidPixel;
+      mmPerPixel: number;
+      binary: BinaryImage;
+      dilated: DilatedMask;
+      contourKey: string;
+    }
+  | null {
   const binary = binarize(imageAnalysis, params.alphaThreshold, cutlineMemo);
   if (!binary) {
-    return fail('transparentImage');
+    return null;
   }
 
-  // スケールは「フィギュア高さ（接地面〜カットライン上端の全高）から絵柄の外側の高さを
-  // 引いた絵柄の高さ(mm)」を「絵柄の高さ(px)」で割って得る。フィギュア高さが絵柄の外側の
-  // 高さ（余白×2＋持ち上げ量＋板厚）以下だと絵柄が存在できないため、計算不能として弾く。
   const mmPerPixel = computeMmPerPixel(params, binary.figureHeightPixels);
   if (!Number.isFinite(mmPerPixel) || mmPerPixel <= 0) {
-    return fail('scaleCalculationFailed');
+    return null;
   }
 
-  // 二値マスクを余白ぶん膨張したマスク。カットライン生成で最も重い段（O(W×H)）であり、
-  // 差込部を合流させた 2 回目の生成でも使い回すため、しきい値・スケール・余白を鍵にメモ化する。
   const maskKey = maskKeyOf(params, mmPerPixel);
   let dilated: DilatedMask;
   if (cutlineMemo && cutlineMemo.maskKey === maskKey && cutlineMemo.mask) {
@@ -402,9 +399,6 @@ export function runAnalysis(
     }
   }
 
-  // 膨張マスクから起こした「カットライン」。以降の重心・台座上面・差込部の配置はすべて
-  // これを基準にする（差込部を含む最終外形はこの後に組み立てる）。隙間埋め閾値 mm・
-  // 連結部最小幅 mm はスケールでピクセルへ換算する（解析はピクセル座標で完結）。
   const contourKey = cutlineKeyOf(params, mmPerPixel);
   let contour: Contour;
   if (cutlineMemo && cutlineMemo.contourKey === contourKey && cutlineMemo.contour) {
@@ -422,29 +416,95 @@ export function runAnalysis(
     }
   }
 
-  // 重心はカットラインが囲む領域の面積重心。差込口・台座・転倒角の基準になる。
   const centroidPixel = polygonCentroid(contour);
   if (!centroidPixel) {
-    return fail('baseCalculationFailed');
+    return null;
   }
+
+  return { contour, centroidPixel, mmPerPixel, binary, dilated, contourKey };
+}
+
+/**
+ * キーホルダーモードの第 2 相。
+ * カットラインを生成し、上部に穴を開けて重心が真下に来るよう回転する。
+ * 台座・差込部・転倒角は計算しない。
+ */
+function runKeychainAnalysis(
+  imageAnalysis: ImageAnalysis,
+  params: AnalysisParameters,
+  cutlineMemo?: CutlineMemo,
+): AnalysisOutcome {
+  const { width, height } = imageAnalysis;
+  const common = buildContourAndCentroid(imageAnalysis, params, cutlineMemo);
+  if (!common) {
+    return fail('transparentImage');
+  }
+  const { contour, centroidPixel, mmPerPixel } = common;
   const centroid = toCentroid(centroidPixel, mmPerPixel);
 
-  // 台座上面は「カットライン最下端 + 持ち上げ量」。板本体が台座へ潜り込まないための
-  // 基準線であり、差込部（首部下端・ツメ上端）・支持範囲・重心高さがすべてこの線を共有する。
+  const keychain = buildKeychainResult(
+    contour,
+    centroid,
+    common.binary.minY,
+    params.keychainHoleDiameterMm,
+    params.keychainHolePaddingMm,
+    params.keychainHoleOffsetXMm,
+    mmPerPixel,
+  );
+  if (!keychain) {
+    return fail('holePlacementFailed');
+  }
+
+  // キーホルダーでは輪郭を回転させ、重心が穴の真下に来るようにする。
+  // オーバーレイ・SVG・3D はすべて buildKeychainResult が返した回転済み contour を基準に描画する。
+  const rotatedCentroid: Centroid = {
+    pixel: keychain.rotatedCentroidPixel,
+    mm: keychain.rotatedCentroidMm,
+    pixelCount: centroid.pixelCount,
+  };
+
+  const imageSize: Size = { width, height };
+  return {
+    ok: true,
+    result: {
+      imageSize,
+      physicalSize: computePhysicalSize(imageSize, mmPerPixel),
+      mmPerPixel,
+      dpi: computeDpi(mmPerPixel),
+      contour: keychain.rotatedContour,
+      centroid: rotatedCentroid,
+      keychain,
+    },
+  };
+}
+
+/**
+ * 台座設計モードの第 2 相。既存の runAnalysis と同等。
+ */
+function runBaseAnalysis(
+  imageAnalysis: ImageAnalysis,
+  params: AnalysisParameters,
+  baseShapeSource: BaseShapeSource | null,
+  cutlineMemo?: CutlineMemo,
+): AnalysisOutcome {
+  const { width, height } = imageAnalysis;
+  const common = buildContourAndCentroid(imageAnalysis, params, cutlineMemo);
+  if (!common) {
+    return fail('transparentImage');
+  }
+  const { contour, centroidPixel, mmPerPixel, dilated, contourKey } = common;
+  const centroid = toCentroid(centroidPixel, mmPerPixel);
+
   const baseTopYPixel = computeBaseTopYPixel(contour, params.plateLiftMm, mmPerPixel);
   if (!Number.isFinite(baseTopYPixel)) {
     return fail('baseCalculationFailed');
   }
 
-  // 差込部（首部＋ツメ）の中心は重心の真下＋オフセット。縦位置は台座上面を境に決まる。
   const slot = findSlot(contour, centroid, params, mmPerPixel, baseTopYPixel);
   if (!slot) {
     return fail('slotPlacementFailed');
   }
 
-  // 首部・ツメを含むようカットラインを下方向へ拡張し、板本体と一体の外形にする。隙間埋めが
-  // 有効なら、首部を合流させたうえで充填をやり直す（首部とフィギュアの合成部にできる狭い
-  // 隙間も埋める）。以降 result.contour（オーバーレイ・SVG が参照）はこの外形になる。
   const finalContour = buildSlottedCutline(
     dilated,
     contour,
@@ -455,8 +515,6 @@ export function runAnalysis(
     cutlineMemo,
   );
 
-  // 台座 footprint（上面図の外形）。形状パラメータだけから決まり、カットライン系の重い段とは
-  // 独立している（台座形状・寸法の変更で二値化・膨張・輪郭抽出は再計算されない）。
   const footprint = buildFootprint(params, baseShapeSource);
   if (!footprint) {
     return fail('baseShapeFailed');
@@ -467,7 +525,6 @@ export function runAnalysis(
     return fail('baseCalculationFailed');
   }
 
-  // 転倒角の失敗（重心高さ 0 等）も、幾何的に自立し得ない＝台座計算不可の一種として扱う。
   const stability = computeStability(centroid, slot, base);
   if (!stability) {
     return fail('baseCalculationFailed');
@@ -488,4 +545,23 @@ export function runAnalysis(
       stability,
     },
   };
+}
+
+/**
+ * 第 2 相：画像不変量（analyzeImage の結果）とパラメータから解析結果一式を求める。
+ *
+ * designMode に応じて台座設計（runBaseAnalysis）かキーホルダー（runKeychainAnalysis）かを
+ * 選択する。共通のカットライン生成は buildContourAndCentroid へ集約し、
+ * どちらのモードでもメモ化が効くようにする。
+ */
+export function runAnalysis(
+  imageAnalysis: ImageAnalysis,
+  params: AnalysisParameters,
+  baseShapeSource: BaseShapeSource | null,
+  cutlineMemo?: CutlineMemo,
+): AnalysisOutcome {
+  if (params.designMode === 'keychain') {
+    return runKeychainAnalysis(imageAnalysis, params, cutlineMemo);
+  }
+  return runBaseAnalysis(imageAnalysis, params, baseShapeSource, cutlineMemo);
 }

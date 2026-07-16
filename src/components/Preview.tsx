@@ -20,7 +20,7 @@
 // 3D モードへ初めて切り替えたときにだけ読み込む（SPEC「技術・読み込み」）。3 つのモードは
 // いずれも**表示のみの切替**で、解析結果・パラメータには一切触れない。
 
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import {
   Box,
@@ -39,12 +39,13 @@ import { Grid } from '@/components/Grid';
 import { RULER_SIZE_PX, Ruler } from '@/components/Ruler';
 import { TopView } from '@/components/TopView';
 import { Button } from '@/components/ui/button';
+import { useTranslation } from '@/locales';
 import { buildOverlayShapes } from '@/render/overlay';
 import { buildSimulationShapes } from '@/render/simulation';
 import { buildTopViewShapes } from '@/render/topView';
 import { useViewport, type ContentBox } from '@/hooks/useViewport';
 import type { AnalysisStatus } from '@/model/state';
-import type { AnalysisError, AnalysisResult, FigureImage, Point } from '@/model/types';
+import type { AnalysisError, AnalysisResult, DesignMode, FigureImage, Point } from '@/model/types';
 import { cn } from '@/lib/utils';
 import { closedCurvePathData } from '@/utils/curve';
 import { radToDeg } from '@/utils/geometry';
@@ -82,6 +83,20 @@ export interface PreviewProps {
    * 解析と同一の判定でα を 2 値化するために要る。
    */
   alphaThreshold?: number;
+  /**
+   * 3D プレビューで背面のアクリル板を表示するか。表示のみのパラメータ。
+   * 省略時は false。
+   */
+  showBackPlate?: boolean;
+  /** 現在のデザインモード。keychain モードでは 2D オーバーレイの内容を変える。 */
+  designMode?: DesignMode;
+  /**
+   * 背面アクリル板に貼る画像。3D プレビューのみ使用する表示アセット。
+   * 省略時は null。
+   */
+  backImage?: FigureImage | null;
+  /** アクリル板の板厚(mm)。3D プレビューで使用する。 */
+  thicknessMm?: number;
   /** 解析の進行状態。'analyzing' の間は解析中インジケータを重ねる。 */
   status?: AnalysisStatus;
   /**
@@ -99,10 +114,17 @@ export function Preview({
   result,
   mmPerPixel,
   alphaThreshold = 0,
+  showBackPlate = false,
+  designMode = 'baseFigure',
+  backImage = null,
+  thicknessMm = 3,
   status,
   error,
   onImageFile,
 }: PreviewProps) {
+  const isKeychain = designMode === 'keychain';
+  const { t } = useTranslation();
+
   // ドラッグ中はドロップ可能であることを視覚的に示すためのフラグ。
   const [isDragOver, setIsDragOver] = useState(false);
   // 転倒シミュレーション（左右の限界姿勢）の表示切替。常時重ねると主オーバーレイが
@@ -120,7 +142,17 @@ export function Preview({
   const [finishView, setFinishView] = useState(false);
   // 3D プレビューモードの表示切替。こちらも表示のみの切替。
   const [view3d, setView3d] = useState(false);
+  // 一度でも 3D ボタンを押したら true にし、3D プレビューをアンマウントせず保持する。
+  const [hasActivated3d, setHasActivated3d] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // 3D チャンクは初回切替時に動的読み込みするが、解析結果が出そうな段階で先に読み込みを
+  // 開始しておく。これにより「3D ボタンを押してから読み込み」による遅延・再マウントを減らす。
+  useEffect(() => {
+    if (result) {
+      void import('@/components/preview3d/Preview3d');
+    }
+  }, [result]);
 
   // 3D は解析結果が要る（立体を組み立てられない）。解析エラーで結果が消えた場合は
   // 自動的に 2D へ戻し、エラー表示が読める状態にする（SPEC「解析結果があるときのみ有効」）。
@@ -132,21 +164,27 @@ export function Preview({
   // オーバーレイ図形は解析結果が変わったときだけ再構築する（不要な再計算の抑制）。
   const overlay = useMemo(() => (result ? buildOverlayShapes(result) : null), [result]);
 
-  // 転倒姿勢も同様に結果が変わったときだけ再構築する。トグル OFF でも構築コストは
-  // 軽い（支点 2 点の算出のみ）ため result を唯一の依存とし、描画側で表示を出し分ける。
-  const simulation = useMemo(() => (result ? buildSimulationShapes(result) : null), [result]);
+  // 転倒姿勢も同様に結果が変わったときだけ再構築する。baseFigure 結果があるときのみ。
+  const simulation = useMemo(
+    () => (result && !result.keychain ? buildSimulationShapes(result) : null),
+    [result],
+  );
 
-  // 上面図（footprint・スリット・重心投影・最悪方位）。こちらも軽いので result 依存で作る。
-  const topView = useMemo(() => (result ? buildTopViewShapes(result) : null), [result]);
+  // 上面図（footprint・スリット・重心投影・最悪方位）。baseFigure 結果があるときのみ。
+  const topView = useMemo(
+    () => (result && !result.keychain ? buildTopViewShapes(result) : null),
+    [result],
+  );
 
   // 既定は矩形以外で ON（矩形は前面図だけで形状が分かる）。ユーザーが一度でも切り替えたら
   // その選択を優先する（SPEC「ユーザーのトグル操作を優先する」）。3D 中は出さない。
-  const topViewDefault = result != null && result.base.shape !== 'rect';
-  const showTopView = (topViewOverride ?? topViewDefault) && topView != null && !show3d;
+  // baseFigure 結果があるときのみ。
+  const topViewDefault = result != null && !result.keychain && result.base?.shape !== 'rect';
+  const showTopView = (topViewOverride ?? topViewDefault) && topView != null && !show3d && !result?.keychain;
 
   // Fit/100% が収める内容範囲。画像だけでなくカットライン（余白で画像枠外へ広がり得る）や
-  // 差込口・台座・支持範囲を含む外接矩形にすることで、余白を増やしても見切れないようにする
-  // （SPEC「表示範囲（見切れ防止）」）。解析前は画像そのものを範囲とする。
+  // 差込口・台座・支持範囲・キーホルダー穴を含む外接矩形にすることで、余白を増やしても
+  // 見切れないようにする（SPEC「表示範囲（見切れ防止）」）。解析前は画像そのものを範囲とする。
   const contentBox = useMemo<ContentBox | null>(() => {
     if (!image) {
       return null;
@@ -169,13 +207,23 @@ export function Preview({
       include(p.x, p.y);
     }
     for (const rect of [overlay.neck, overlay.tab, overlay.base]) {
-      include(rect.x, rect.y);
-      include(rect.x + rect.width, rect.y + rect.height);
+      if (rect) {
+        include(rect.x, rect.y);
+        include(rect.x + rect.width, rect.y + rect.height);
+      }
     }
-    include(overlay.support.from.x, overlay.support.from.y);
-    include(overlay.support.to.x, overlay.support.to.y);
-    include(overlay.plumb.from.x, overlay.plumb.from.y);
-    include(overlay.plumb.to.x, overlay.plumb.to.y);
+    if (overlay.support) {
+      include(overlay.support.from.x, overlay.support.from.y);
+      include(overlay.support.to.x, overlay.support.to.y);
+    }
+    if (overlay.plumb) {
+      include(overlay.plumb.from.x, overlay.plumb.from.y);
+      include(overlay.plumb.to.x, overlay.plumb.to.y);
+    }
+    if (overlay.hole) {
+      include(overlay.hole.center.x - overlay.hole.radius, overlay.hole.center.y - overlay.hole.radius);
+      include(overlay.hole.center.x + overlay.hole.radius, overlay.hole.center.y + overlay.hole.radius);
+    }
     return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
   }, [image, overlay]);
 
@@ -187,8 +235,12 @@ export function Preview({
     if (!overlay) {
       return { x: 0, y: image?.height ?? 0 };
     }
+    if (isKeychain || !overlay.base) {
+      // keychain モードでは重心を原点、Y は画像下端を基準にする。
+      return { x: overlay.centroid.center.x, y: image?.height ?? overlay.centroid.center.y };
+    }
     return { x: overlay.centroid.center.x, y: overlay.base.y + overlay.base.height };
-  }, [overlay, image]);
+  }, [overlay, image, isKeychain]);
 
   // 表示操作（ズーム/パン/Fit/100%）。自動フィットは画像の同一性（id）で制御し、
   // パラメータ変更（box の変化）ではユーザーのズーム/パンを保つ。3D 中は 2D の
@@ -296,33 +348,44 @@ export function Preview({
             />
           )}
 
-          {/* 3D プレビュー：チャンクの読み込み中はインジケータを出す（初回切替時のみ）。
-              2D の stage は描かないが、useViewport の変換 state は保持される。 */}
-          {show3d && result && (
-            <Suspense
-              fallback={
-                <div
-                  role="status"
-                  aria-live="polite"
-                  className="text-muted-foreground absolute inset-0 flex flex-col items-center justify-center gap-2"
-                >
-                  <Loader2 className="size-8 animate-spin" />
-                  <p className="text-sm font-medium">3Dビューを読み込み中…</p>
-                </div>
-              }
-            >
-              <Preview3d result={result} image={image} alphaThreshold={alphaThreshold} />
-            </Suspense>
+          {/* 3D プレビュー：初回読み込み後はアンマウントせず `display` で出し分ける。
+              これにより WebGL コンテキスト・Rapier ワールドの再作成を防ぎ、
+              2D ↔ 3D の切り替えが安定する（SPEC「3D 切替は表示のみ」）。
+              チャンクの読み込み中はインジケータを出す（初回切替時のみ）。 */}
+          {result && hasActivated3d && (
+            <KeepAlive3d active={show3d}>
+              <Suspense
+                fallback={
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="text-muted-foreground absolute inset-0 flex flex-col items-center justify-center gap-2"
+                  >
+                    <Loader2 className="size-8 animate-spin" />
+                    <p className="text-sm font-medium">{t('preview.loading3d')}</p>
+                  </div>
+                }
+              >
+                <Preview3d
+                  result={result}
+                  image={image}
+                  alphaThreshold={alphaThreshold}
+                  showBackPlate={showBackPlate}
+                  backImage={backImage}
+                  thicknessMm={thicknessMm}
+                />
+              </Suspense>
+            </KeepAlive3d>
           )}
 
           {/* stage：画像の自然サイズを持つ箱。左上原点で transform を適用し、内包する
               Canvas と SVG をまとめて拡縮・移動する。両者は同一の箱を満たすため常に重なる。
-              3D 中はアンマウントせず hidden で隠す：Canvas への描画は画像が変わったときの
+              3D 中はアンマウントせず display:none で隠す：Canvas への描画は画像が変わったときの
               effect でしか行わないため、アンマウントすると 2D へ戻ったとき白紙になる。 */}
           <div
-            hidden={show3d}
             className="absolute top-0 left-0 origin-top-left"
             style={{
+              display: show3d ? 'none' : 'block',
               width: image.width,
               height: image.height,
               transform: `translate(${transform.tx}px, ${transform.ty}px) scale(${s})`,
@@ -390,59 +453,75 @@ export function Preview({
                   strokeWidth={1 / s}
                 />
 
-                {/* 台座。上辺が台座上面。差込部・支持範囲より背面に置くため先に描く。
-                    通常は緑のハイライトだが、完成プレビューモードでは仕上がりを見るため
-                    カットラインと同色にそろえる。 */}
-                <rect
-                  x={overlay.base.x}
-                  y={overlay.base.y}
-                  width={overlay.base.width}
-                  height={overlay.base.height}
-                  fill={finishView ? CONTOUR_FILL : 'rgba(34, 197, 94, 0.25)'}
-                  stroke={finishView ? CONTOUR_STROKE : 'rgb(22, 163, 74)'}
-                  strokeWidth={1.5 / s}
-                />
+                {/* 台座。baseFigure モードのみ。 */}
+                {overlay.base && (
+                  <rect
+                    x={overlay.base.x}
+                    y={overlay.base.y}
+                    width={overlay.base.width}
+                    height={overlay.base.height}
+                    fill={finishView ? CONTOUR_FILL : 'rgba(34, 197, 94, 0.25)'}
+                    stroke={finishView ? CONTOUR_STROKE : 'rgb(22, 163, 74)'}
+                    strokeWidth={1.5 / s}
+                  />
+                )}
+
+                {/* キーホルダー穴。keychain モードでは常に描く（仕上がりにも含まれる要素）。 */}
+                {overlay.hole && (
+                  <circle
+                    cx={overlay.hole.center.x}
+                    cy={overlay.hole.center.y}
+                    r={overlay.hole.radius}
+                    fill="rgba(239, 68, 68, 0.15)"
+                    stroke="rgb(239, 68, 68)"
+                    strokeWidth={1.5 / s}
+                  />
+                )}
 
                 {/* ここから下は解析表示モード専用のガイド。完成プレビューモードでは
-                    絵柄・カットライン・台座だけを見せるため一切描かない。 */}
+                    絵柄・カットライン・台座・穴だけを見せるため一切描かない。 */}
                 {!finishView && (
                   <>
-                    {/* 差込部（青矩形 2 つ）。首部＝板と台座の隙間を埋める広い矩形、ツメ＝台座上面
-                        より下へ挿さる狭い矩形。幅の差でできる肩が台座上面に乗って止まる。 */}
-                    {[overlay.neck, overlay.tab].map((rect) => (
-                      <rect
-                        key={rect.role}
-                        x={rect.x}
-                        y={rect.y}
-                        width={rect.width}
-                        height={rect.height}
-                        fill="rgba(37, 99, 235, 0.25)"
-                        stroke="rgb(37, 99, 235)"
-                        strokeWidth={1.5 / s}
+                    {/* 差込部（青矩形 2 つ）。baseFigure モードのみ。 */}
+                    {overlay.neck && overlay.tab &&
+                      [overlay.neck, overlay.tab].map((rect) => (
+                        <rect
+                          key={rect.role}
+                          x={rect.x}
+                          y={rect.y}
+                          width={rect.width}
+                          height={rect.height}
+                          fill="rgba(37, 99, 235, 0.25)"
+                          stroke="rgb(37, 99, 235)"
+                          strokeWidth={1.5 / s}
+                        />
+                      ))}
+
+                    {/* 支持範囲（オレンジ線）。baseFigure モードのみ。 */}
+                    {overlay.support && (
+                      <line
+                        x1={overlay.support.from.x}
+                        y1={overlay.support.from.y}
+                        x2={overlay.support.to.x}
+                        y2={overlay.support.to.y}
+                        stroke="rgb(249, 115, 22)"
+                        strokeWidth={3 / s}
+                        strokeLinecap="round"
                       />
-                    ))}
+                    )}
 
-                    {/* 支持範囲（オレンジ線）。 */}
-                    <line
-                      x1={overlay.support.from.x}
-                      y1={overlay.support.from.y}
-                      x2={overlay.support.to.x}
-                      y2={overlay.support.to.y}
-                      stroke="rgb(249, 115, 22)"
-                      strokeWidth={3 / s}
-                      strokeLinecap="round"
-                    />
-
-                    {/* 重心からの鉛直線（点線）。支持範囲と対比させて転倒余裕を目視する。 */}
-                    <line
-                      x1={overlay.plumb.from.x}
-                      y1={overlay.plumb.from.y}
-                      x2={overlay.plumb.to.x}
-                      y2={overlay.plumb.to.y}
-                      stroke="rgba(239, 68, 68, 0.9)"
-                      strokeWidth={1.5 / s}
-                      strokeDasharray={`${6 / s} ${4 / s}`}
-                    />
+                    {/* 重心からの鉛直線（点線）。baseFigure モードのみ。 */}
+                    {overlay.plumb && (
+                      <line
+                        x1={overlay.plumb.from.x}
+                        y1={overlay.plumb.from.y}
+                        x2={overlay.plumb.to.x}
+                        y2={overlay.plumb.to.y}
+                        stroke="rgba(239, 68, 68, 0.9)"
+                        strokeWidth={1.5 / s}
+                        strokeDasharray={`${6 / s} ${4 / s}`}
+                      />
+                    )}
 
                     {/* 重心（赤丸）。最前面へ置いて他図形に埋もれないようにする。 */}
                     <circle
@@ -489,11 +568,14 @@ export function Preview({
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={() => setView3d((v) => !v)}
+              onClick={() => {
+                setView3d((v) => !v);
+                setHasActivated3d(true);
+              }}
               disabled={!result}
               className={cn(show3d && 'text-primary bg-primary/10')}
-              title="3Dプレビュー"
-              aria-label="3Dプレビュー"
+              title={t('preview.toolbar.preview3d')}
+              aria-label={t('preview.toolbar.preview3d')}
               aria-pressed={show3d}
             >
               <Box />
@@ -507,25 +589,25 @@ export function Preview({
               onClick={() => setFinishView((v) => !v)}
               disabled={!overlay || show3d}
               className={cn(finishView && !show3d && 'text-primary bg-primary/10')}
-              title="完成プレビュー"
-              aria-label="完成プレビュー"
+              title={t('preview.toolbar.finishView')}
+              aria-label={t('preview.toolbar.finishView')}
               aria-pressed={finishView && !show3d}
             >
               <Eye />
             </Button>
             {/* 転倒シミュレーション表示切替。解析結果が無い間は対象が無いので無効化。
-                完成プレビューモード・3D モードではガイドを一切出さないためトグル自体を
-                無効化する（3D の転倒は Preview3d の傾けスライダーで行う）。 */}
+                keychain モードでは転倒シミュレーションを使わない。完成プレビューモード・3D モード
+                ではガイドを一切出さないためトグル自体を無効化する。 */}
             <Button
               variant="ghost"
               size="icon-sm"
               onClick={() => setShowSimulation((v) => !v)}
-              disabled={!simulation || finishView || show3d}
+              disabled={!simulation || finishView || show3d || isKeychain}
               className={cn(
                 showSimulation && !finishView && !show3d && 'text-primary bg-primary/10',
               )}
-              title="転倒シミュレーション"
-              aria-label="転倒シミュレーション"
+              title={t('preview.toolbar.simulation')}
+              aria-label={t('preview.toolbar.simulation')}
               aria-pressed={showSimulation && !finishView && !show3d}
             >
               <PersonStanding />
@@ -536,15 +618,15 @@ export function Preview({
                 ボタンを残すと二重に見えてしまう）。 */}
             {!show3d && (
               <>
-                {/* 上面図インセットの表示切替。解析結果（footprint）が無い間は描く対象が無い。 */}
+                {/* 上面図インセットの表示切替。baseFigure モードのみ。 */}
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   onClick={() => setTopViewOverride(!(topViewOverride ?? topViewDefault))}
-                  disabled={!topView}
+                  disabled={!topView || isKeychain}
                   className={cn(showTopView && 'text-primary bg-primary/10')}
-                  title="上面図（台座形状）"
-                  aria-label="上面図"
+                  title={t('preview.toolbar.topView')}
+                  aria-label={t('preview.toolbar.topViewAria')}
                   aria-pressed={showTopView}
                 >
                   <RectangleHorizontal />
@@ -556,8 +638,8 @@ export function Preview({
                   onClick={() => setShowGrid((v) => !v)}
                   disabled={mmPerPixel == null}
                   className={cn(showGrid && 'text-primary bg-primary/10')}
-                  title="グリッド表示"
-                  aria-label="グリッド表示"
+                  title={t('preview.toolbar.grid')}
+                  aria-label={t('preview.toolbar.grid')}
                   aria-pressed={showGrid}
                 >
                   <Grid3x3 />
@@ -566,8 +648,8 @@ export function Preview({
                   variant="ghost"
                   size="icon-sm"
                   onClick={zoomOut}
-                  title="縮小"
-                  aria-label="縮小"
+                  title={t('preview.toolbar.zoomOut')}
+                  aria-label={t('preview.toolbar.zoomOut')}
                 >
                   <Minus />
                 </Button>
@@ -577,7 +659,7 @@ export function Preview({
                   size="sm"
                   className="min-w-14 tabular-nums"
                   onClick={actualSize}
-                  title="100%表示"
+                  title={t('preview.toolbar.actualSize')}
                 >
                   {Math.round(s * 100)}%
                 </Button>
@@ -585,8 +667,8 @@ export function Preview({
                   variant="ghost"
                   size="icon-sm"
                   onClick={zoomIn}
-                  title="拡大"
-                  aria-label="拡大"
+                  title={t('preview.toolbar.zoomIn')}
+                  aria-label={t('preview.toolbar.zoomIn')}
                 >
                   <Plus />
                 </Button>
@@ -594,8 +676,8 @@ export function Preview({
                   variant="ghost"
                   size="icon-sm"
                   onClick={fit}
-                  title="全体表示（Fit）"
-                  aria-label="全体表示"
+                  title={t('preview.toolbar.fit')}
+                  aria-label={t('preview.toolbar.fit')}
                 >
                   <Maximize2 />
                 </Button>
@@ -618,7 +700,7 @@ export function Preview({
                 className="bg-background/80 text-muted-foreground pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-md border px-2 py-1 shadow-sm backdrop-blur"
               >
                 <Loader2 className="size-3.5 animate-spin" />
-                <span className="text-xs font-medium">更新中…</span>
+                <span className="text-xs font-medium">{t('preview.updating')}</span>
               </div>
             ) : (
               <div
@@ -627,18 +709,14 @@ export function Preview({
                 className="text-muted-foreground bg-background/70 pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 backdrop-blur-sm"
               >
                 <Loader2 className="size-8 animate-spin" />
-                <p className="text-sm font-medium">解析中…</p>
+                <p className="text-sm font-medium">{t('preview.analyzing')}</p>
               </div>
             ))}
         </>
       ) : (
         <div className="text-muted-foreground flex flex-col items-center gap-2 text-center">
           <ImageOff className="size-10 opacity-50" />
-          <p className="text-sm">
-            {isDragOver
-              ? 'ここにドロップ'
-              : 'PNG画像をドラッグ＆ドロップ、または読み込んでください'}
-          </p>
+          <p className="text-sm">{isDragOver ? t('preview.dropHere') : t('preview.dropPrompt')}</p>
         </div>
       )}
 
@@ -656,9 +734,28 @@ export function Preview({
           // 余白を残して折り返させる（translate による中央寄せだと折り返し幅を制限できない）。
           className="border-destructive/50 bg-background/90 text-destructive pointer-events-none absolute inset-x-2 z-20 mx-auto w-fit rounded-lg border px-4 py-2 text-sm shadow-sm backdrop-blur"
         >
-          {error.message}
+          {t(`errors.${error.kind}` as const)}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * 3D プレビューを切替時にアンマウントしないためのラッパー。
+ *
+ * 親が `hasActivated3d` を true にしてからは常に子を保持し、
+ * それ以降は `display` で表示／非表示を切り替えるだけ。
+ * これにより WebGL コンテキストや Rapier ワールドの再作成が起きず、
+ * 2D ↔ 3D の往復が安定する。
+ */
+function KeepAlive3d({ active, children }: { active: boolean; children: ReactNode }) {
+  return (
+    <div
+      style={{ display: active ? 'block' : 'none' }}
+      className="absolute inset-0"
+    >
+      {children}
     </div>
   );
 }
