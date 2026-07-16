@@ -140,9 +140,7 @@ function handleRunAnalysis(request: RunAnalysisRequest): void {
     };
   } else {
     try {
-      const { width, height } = cache.analysis;
       outcome = runAnalysis(
-        { width, height },
         cache.analysis,
         params,
         baseShapeSource,

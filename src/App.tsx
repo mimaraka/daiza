@@ -2,7 +2,7 @@
 // 各パネルを配線する。PNG 読み込み（TODO 4）・解析パイプライン（TODO 13）・
 // エクスポート（SVG / Adobe Illustrator）を配線済み。
 
-import { useCallback, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 
 import { loadBaseShapeSource } from '@/analysis/baseShapeSource';
 import { loadPngFile } from '@/analysis/imageLoader';
@@ -14,10 +14,13 @@ import { PaneResizer } from '@/components/PaneResizer';
 import { Preview } from '@/components/Preview';
 import { ResultPanel } from '@/components/ResultPanel';
 import { generateAi } from '@/export/ai';
+import { generateMockup2dPng } from '@/export/mockup2d';
+import { generateMockup3dPng } from '@/export/mockup3d';
 import { bitmapToPngBytes, bitmapToPngDataUrl } from '@/export/raster';
 import { generateSvg } from '@/export/svg';
 import { useAnalysis } from '@/hooks/useAnalysis';
 import { useAppState } from '@/hooks/useAppState';
+import { useTranslation } from '@/locales';
 import { toUnexpectedError } from '@/model/errors';
 
 /**
@@ -34,10 +37,24 @@ function downloadBlob(blob: Blob, fileName: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** data URL をそのままダウンロードさせる。 */
+function downloadDataUrl(dataUrl: string, fileName: string): void {
+  const anchor = document.createElement('a');
+  anchor.href = dataUrl;
+  anchor.download = fileName;
+  anchor.click();
+}
+
 /** 画像ファイル名（例 figure.png）から、指定拡張子のダウンロード名を導く。 */
 function exportFileName(imageFileName: string, extension: string): string {
   const base = imageFileName.replace(/\.[^./\\]+$/, '');
   return `${base || 'daiza'}.${extension}`;
+}
+
+/** モックアップ PNG 用のファイル名（suffix: mockup2d / mockup3d など）。 */
+function exportMockupFileName(imageFileName: string, suffix: string): string {
+  const base = imageFileName.replace(/\.[^./\\]+$/, '');
+  return `${base || 'daiza'}-${suffix}.png`;
 }
 
 /**
@@ -48,7 +65,12 @@ const LEFT_PANE = { initial: 384, min: 280, max: 560 } as const;
 const RIGHT_PANE = { initial: 320, min: 240, max: 480 } as const;
 
 function App() {
+  const { t } = useTranslation();
   const { state, actions } = useAppState();
+
+  useEffect(() => {
+    document.title = t('app.pageTitle');
+  }, [t]);
 
   // ペイン幅（広幅レイアウト時のみ有効）。CSS 変数として main へ渡し、Tailwind の
   // lg: 修飾子と組み合わせることで、縦積みになる狭幅では幅指定自体を効かせない。
@@ -94,6 +116,25 @@ function App() {
             actions.setBaseShapeSource(loaded.source);
           } else {
             actions.failAnalysis(loaded.error);
+          }
+        } catch (cause) {
+          actions.failAnalysis(toUnexpectedError(cause));
+        }
+      })();
+    },
+    [actions],
+  );
+
+  // 背面アクリル板画像の読み込み口。PNG のみ。失敗は型付きエラーへ。
+  const handleBackImageFile = useCallback(
+    (file: File): void => {
+      void (async () => {
+        try {
+          const result = await loadPngFile(file);
+          if (result.ok) {
+            actions.setBackImage(result.image);
+          } else {
+            actions.failAnalysis(result.error);
           }
         } catch (cause) {
           actions.failAnalysis(toUnexpectedError(cause));
@@ -167,14 +208,59 @@ function App() {
     })();
   }, [result, image, actions]);
 
+  // 2D 広告用モックアップ：前面図を商品写真風に仕上げた透過 PNG。
+  const handleExportMockup2d = useCallback(() => {
+    if (!result || !image) {
+      return;
+    }
+    try {
+      const dataUrl = generateMockup2dPng(result, image);
+      downloadDataUrl(dataUrl, exportMockupFileName(image.fileName, 'mockup2d'));
+    } catch (cause) {
+      actions.failAnalysis(toUnexpectedError(cause));
+    }
+  }, [result, image, actions]);
+
+  // 3D 広告用モックアップ：既定の 3D 視点で撮影した透過 PNG。
+  // three を dynamic import するため、生成中はボタンを止める。
+  const handleExportMockup3d = useCallback(() => {
+    if (!result || !image) {
+      return;
+    }
+    setExporting(true);
+    void (async () => {
+      try {
+        const dataUrl = await generateMockup3dPng(
+          result,
+          image,
+          parameters.alphaThreshold,
+          parameters.thicknessMm,
+          parameters.showBackPlate,
+          state.backImage,
+        );
+        downloadDataUrl(dataUrl, exportMockupFileName(image.fileName, 'mockup3d'));
+      } catch (cause) {
+        actions.failAnalysis(toUnexpectedError(cause));
+      } finally {
+        setExporting(false);
+      }
+    })();
+  }, [
+    result,
+    image,
+    parameters.alphaThreshold,
+    parameters.thicknessMm,
+    parameters.showBackPlate,
+    state.backImage,
+    actions,
+  ]);
+
   return (
     <div className="bg-background flex h-svh flex-col">
       <header className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
-        <h1 className="text-lg font-bold">Daiza</h1>
-        <p className="text-muted-foreground hidden text-sm sm:block">
-          アクリルフィギュア台座設計ツール
-        </p>
-        {/* 右端にプライバシー表明と GitHub リポジトリへの導線を常設する。 */}
+        <h1 className="text-lg font-bold">{t('app.title')}</h1>
+        <p className="text-muted-foreground hidden text-sm sm:block">{t('app.subtitle')}</p>
+        {/* 右端にプライバシー表明・GitHub リポジトリへの導線・言語切替を常設する。 */}
         <HeaderActions />
       </header>
 
@@ -198,6 +284,8 @@ function App() {
             parameters={state.parameters}
             onParametersChange={actions.updateParameters}
             onImageFile={handleImageFile}
+            backImage={state.backImage}
+            onBackImageFile={handleBackImageFile}
             baseShapeSource={state.baseShapeSource}
             onBaseShapeFile={handleBaseShapeFile}
           />
@@ -209,7 +297,7 @@ function App() {
           max={LEFT_PANE.max}
           sign={1}
           onWidthChange={setLeftWidth}
-          label="左パネルの幅"
+          label={t('paneResizer.left')}
         />
 
         {/* 中央：プレビュー。残りの幅・高さを使い切る主役の列。狭幅で縦積みになったときに
@@ -222,6 +310,10 @@ function App() {
             result={state.result}
             mmPerPixel={mmPerPixel}
             alphaThreshold={parameters.alphaThreshold}
+            showBackPlate={parameters.showBackPlate}
+            designMode={parameters.designMode}
+            thicknessMm={parameters.thicknessMm}
+            backImage={state.backImage}
             status={state.status}
             error={state.error}
             onImageFile={handleImageFile}
@@ -235,20 +327,27 @@ function App() {
           max={RIGHT_PANE.max}
           sign={-1}
           onWidthChange={setRightWidth}
-          label="解析結果パネルの幅"
+          label={t('paneResizer.right')}
         />
 
         {/* 右パネル：解析結果と、それを書き出すエクスポート操作。左パネルと同じく
             可変幅・列内スクロール。 */}
         <aside className="flex shrink-0 flex-col gap-4 lg:w-[var(--right-pane-width)] lg:overflow-y-auto">
-          <ResultPanel result={state.result} />
+          <ResultPanel result={state.result} designMode={parameters.designMode} />
           {/* 結果がある時だけ各 onExport を渡し、無ければ prop 自体を省いてボタンを無効化する
               （exactOptionalPropertyTypes 下では undefined の明示代入を避け、条件スプレッドで出し分ける）。 */}
           <ExportPanel
             embedImageInSvg={embedImageInSvg}
             onEmbedImageInSvgChange={setEmbedImageInSvg}
             exporting={exporting}
-            {...(result ? { onExportSvg: handleExportSvg, onExportAi: handleExportAi } : {})}
+            {...(result
+              ? {
+                  onExportSvg: handleExportSvg,
+                  onExportAi: handleExportAi,
+                  onExportMockup2d: handleExportMockup2d,
+                  onExportMockup3d: handleExportMockup3d,
+                }
+              : {})}
           />
         </aside>
       </main>
