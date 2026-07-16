@@ -17,7 +17,6 @@ import {
   Vector2,
 } from 'three';
 
-import type { Point } from '@/model/types';
 import type { Scene3dBase, Scene3dPlate } from '@/render/scene3d';
 
 /** 押し出しの共通設定。面取りは付けず（切断面はシャープなアクリル小口）、頂点列は直線分。 */
@@ -67,31 +66,6 @@ export function buildBaseGeometry(base: Scene3dBase): ExtrudeGeometry {
   );
 
   return new ExtrudeGeometry(shape, { ...EXTRUDE_OPTIONS, depth: base.thicknessMm });
-}
-
-/**
- * キーホルダー用アクリル板（穴付き）の押し出しジオメトリ。
- *
- * 外形は穴中心を原点としたシーン座標（XY 平面）で与え、板厚ぶんを +Z へ押し出す。
- * リング穴は円形の貫通穴として追加する。
- */
-export function buildKeychainPlateGeometry(plate: {
-  readonly outline: readonly Point[];
-  readonly thicknessMm: number;
-  readonly holeRadiusMm: number;
-}): ExtrudeGeometry {
-  const shape = new Shape(counterClockwise(plate.outline.map((p) => new Vector2(p.x, p.y))));
-
-  const r = plate.holeRadiusMm;
-  const segments = 32;
-  const holePoints: Vector2[] = [];
-  for (let i = 0; i < segments; i++) {
-    const theta = (i / segments) * Math.PI * 2;
-    holePoints.push(new Vector2(Math.cos(theta) * r, Math.sin(theta) * r));
-  }
-  shape.holes.push(new Path(holePoints));
-
-  return new ExtrudeGeometry(shape, { ...EXTRUDE_OPTIONS, depth: plate.thicknessMm });
 }
 
 /**

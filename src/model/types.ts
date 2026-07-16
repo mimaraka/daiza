@@ -128,12 +128,6 @@ export interface Footprint {
 }
 
 /**
- * デザインモード。同じソース画像に対する 2 つのレイアウトを切り替える。
- * UI 上のトグルであり、設計状態やエクスポートには含まれない（ADR-0001）。
- */
-export type DesignMode = 'baseFigure' | 'keychain';
-
-/**
  * ユーザーが操作する解析パラメータ。
  * これらの変更が「解析 → 状態更新 → 再描画」パイプラインのトリガーになる。
  */
@@ -261,32 +255,6 @@ export interface AnalysisParameters {
    * 方位角（右 0° → 前 90°）と同じ。
    */
   basePolygonRotationDeg: number;
-  /**
-   * 3D プレビューで背後のアクリル板（バックプレート）を表示するか。視覚確認用の
-   * 表示パラメータであり、解析・転倒角・エクスポートには影響しない。
-   */
-  showBackPlate: boolean;
-  /**
-   * デザインモード。既定は台座設計（baseFigure）。
-   * keychain に切り替えると、首・ツメ・台座の解析をスキップし、
-   * カットライン上部にリング穴を開けて重心が穴の真下にくるよう回転する。
-   */
-  designMode: DesignMode;
-  /**
-   * キーホルダー穴の直径(mm)。既定 4 mm、1–10 mm で 0.5 mm 刻み。
-   */
-  keychainHoleDiameterMm: number;
-  /**
-   * キーホルダー穴の上端からの余裕(mm)。
-   * 0 のとき穴縁がカットラインから最低限の余裕(1.5 mm)を保った最も高い位置に置かれ、
-   * 正の値ほど下へずれて穴周りの素材を厚くする。
-   */
-  keychainHolePaddingMm: number;
-  /**
-   * キーホルダー穴の水平オフセット(mm)。
-   * 0 のとき穴中心は重心 X 上。正で右、負で左へずれる。
-   */
-  keychainHoleOffsetXMm: number;
 }
 
 /** 重心解析の結果。 */
@@ -414,27 +382,6 @@ export interface StabilityResult {
 }
 
 /**
- * キーホルダーモードの解析結果。
- * 穴位置・回転角・回転後の重心を保持し、SVG エクスポートや 3D プレビューが参照する。
- */
-export interface KeychainResult {
-  /** リング穴中心（ピクセル座標）。 */
-  holeCenterPixel: Point;
-  /** リング穴中心（実寸 mm 座標）。 */
-  holeCenterMm: Point;
-  /** リング穴半径(mm)。 */
-  holeRadiusMm: number;
-  /** 回転角(度)。重心が穴の真下に来るようカットラインを回転した量。 */
-  rotationDeg: number;
-  /** 回転後の重心（ピクセル座標）。プレビュー描画用。 */
-  rotatedCentroidPixel: Point;
-  /** 回転後の重心（実寸 mm 座標）。 */
-  rotatedCentroidMm: Point;
-  /** 上端パッドを付加・回転済みのカットライン。 */
-  rotatedContour: Contour;
-}
-
-/**
  * 1 回の解析で確定する結果一式。
  * オーバーレイ描画・結果表示・SVG エクスポートは、この単一オブジェクトを入力とする。
  */
@@ -453,12 +400,9 @@ export interface AnalysisResult {
   /** 外形（輪郭）ポリゴン。 */
   contour: Contour;
   centroid: Centroid;
-  /** 差込部・台座・転倒角。baseFigure モードでのみ存在する。 */
-  slot?: SlotResult;
-  base?: BaseResult;
-  stability?: StabilityResult;
-  /** キーホルダーモードの結果。keychain モードでのみ存在する。 */
-  keychain?: KeychainResult;
+  slot: SlotResult;
+  base: BaseResult;
+  stability: StabilityResult;
 }
 
 /**
@@ -471,16 +415,13 @@ export type AnalysisErrorKind =
   | 'transparentImage' // 全透明でアクリル領域が存在しない
   | 'scaleCalculationFailed' // スケール計算不可（フィギュア高さが接地面までのオフセット以下）
   | 'slotPlacementFailed' // 差込口が配置不可
-  | 'holePlacementFailed' // キーホルダー穴が配置不可（縁までの余裕不足等）
   | 'baseCalculationFailed' // 台座計算不可（重心が支持範囲外・スリットが台座の縁を割る等）
   | 'baseShapeFailed' // 台座形状が利用できない（任意形状のソース未読込・読込失敗・寸法不正）
-  | 'baseShapeUnsupported' // 台座形状ソースのファイル形式が非対応
-  | 'baseShapeDecodeFailed' // 台座形状ソースのデコード失敗
-  | 'baseShapeEmptyPng' // PNG シルエットから輪郭が抽出できない
-  | 'baseShapeEmptySvg' // SVG から輪郭が抽出できない
   | 'unexpectedError'; // 想定外の例外（バグ等）の受け皿。クラッシュさせず表示する
 
-/** UI へ提示するためのエラー情報。メッセージ文字列は UI 層の翻訳テーブルへ委ねる。 */
+/** UI へ提示するためのエラー情報。 */
 export interface AnalysisError {
   kind: AnalysisErrorKind;
+  /** ユーザー向けの説明文（日本語）。 */
+  message: string;
 }

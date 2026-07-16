@@ -1,24 +1,15 @@
 // ヘッダー右端の常設表示。
 //
-// 1) 言語切替：英語・タイ語・日本語から選択できるドロップダウン。
-// 2) プライバシー表明：本アプリは画像解析・幾何計算・SVG 生成をすべてブラウザ内で完結させ、
+// 1) プライバシー表明：本アプリは画像解析・幾何計算・SVG 生成をすべてブラウザ内で完結させ、
 //    画像や解析データを外部へ送信しない（SPEC の設計制約）。利用者は「アップロードした絵柄が
 //    どこかへ送られるのでは」と当然身構えるため、その保証は読み込み前から見える位置に置く。
-// 3) ソースコードへの導線：上の主張は検証できて初めて意味を持つので、リポジトリを併記する。
+// 2) ソースコードへの導線：上の主張は検証できて初めて意味を持つので、リポジトリを併記する。
 //
-// 状態を持たない presentational コンポーネント（言語切替は LocaleContext へ委ねる）。
+// 状態を持たない presentational コンポーネント。
 
 import { ShieldCheck } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { AVAILABLE_LOCALES, type Locale, useLocale } from '@/locales';
 
 const REPOSITORY_URL = 'https://github.com/mimaraka/daiza';
 
@@ -41,50 +32,28 @@ function GithubMark({ className }: { className?: string }) {
 }
 
 export function HeaderActions() {
-  const { locale, setLocale, t } = useLocale();
-
   return (
     <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
       {/* 画面が狭いときは全文だと折り返して主役（プレビュー）を押し下げるため、
           アイコン＋短文に切り替える。title で全文を補う。 */}
       <p
         className="text-muted-foreground flex items-center gap-1.5 text-xs"
-        title={t('headerActions.privacyTooltip')}
+        title="画像解析・計算・ファイル生成はすべてブラウザ内で完結します。画像や解析結果がサーバーへ送信されることはありません。"
       >
         <ShieldCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-        <span className="hidden md:inline">{t('headerActions.privacyFull')}</span>
-        <span className="md:hidden">{t('headerActions.privacyShort')}</span>
+        <span className="hidden md:inline">
+          画像はブラウザ内でのみ処理され、サーバーへ送信されません
+        </span>
+        <span className="md:hidden">サーバー送信なし</span>
       </p>
 
       {/* rel="noreferrer" は遷移先へ参照元を渡さないため。外部送信をしない方針と整合させる。 */}
       <Button variant="outline" size="sm" asChild>
-        <a
-          href={REPOSITORY_URL}
-          target="_blank"
-          rel="noreferrer"
-          title={t('headerActions.githubTooltip')}
-        >
+        <a href={REPOSITORY_URL} target="_blank" rel="noreferrer" title="GitHub リポジトリを開く">
           <GithubMark className="size-4" />
-          <span className="hidden sm:inline">{t('headerActions.github')}</span>
+          <span className="hidden sm:inline">GitHub</span>
         </a>
       </Button>
-
-      <Select
-        value={locale}
-        onValueChange={(value) => setLocale(value as Locale)}
-        aria-label={t('locale.selectLabel')}
-      >
-        <SelectTrigger className="h-8 w-[5.5rem] text-xs">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {AVAILABLE_LOCALES.map((code) => (
-            <SelectItem key={code} value={code}>
-              {t(`locale.${code}` as const)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
     </div>
   );
 }

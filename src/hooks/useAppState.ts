@@ -21,10 +21,6 @@ export interface AppStateActions {
   setImage: (image: FigureImage) => void;
   /** 画像を破棄して待機状態へ戻す。 */
   clearImage: () => void;
-  /** 背面アクリル板用画像をセットする。 */
-  setBackImage: (image: FigureImage) => void;
-  /** 背面アクリル板用画像を破棄する。 */
-  clearBackImage: () => void;
   /** パラメータを部分更新する（再解析トリガー）。 */
   updateParameters: (parameters: Partial<AnalysisParameters>) => void;
   /** 任意形状の台座形状ソースをセットする（台座奥行がアスペクト比へ追従する）。 */
@@ -52,11 +48,6 @@ export function useAppState(): UseAppStateReturn {
 
   const setImage = useCallback((image: FigureImage) => dispatch({ type: 'setImage', image }), []);
   const clearImage = useCallback(() => dispatch({ type: 'clearImage' }), []);
-  const setBackImage = useCallback(
-    (image: FigureImage) => dispatch({ type: 'setBackImage', image }),
-    [],
-  );
-  const clearBackImage = useCallback(() => dispatch({ type: 'clearBackImage' }), []);
   const updateParameters = useCallback(
     (parameters: Partial<AnalysisParameters>) => dispatch({ type: 'updateParameters', parameters }),
     [],
@@ -80,8 +71,6 @@ export function useAppState(): UseAppStateReturn {
     () => ({
       setImage,
       clearImage,
-      setBackImage,
-      clearBackImage,
       updateParameters,
       setBaseShapeSource,
       startAnalysis,
@@ -91,8 +80,6 @@ export function useAppState(): UseAppStateReturn {
     [
       setImage,
       clearImage,
-      setBackImage,
-      clearBackImage,
       updateParameters,
       setBaseShapeSource,
       startAnalysis,

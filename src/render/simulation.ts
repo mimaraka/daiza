@@ -57,9 +57,6 @@ export interface SimulationShapes {
  */
 export function buildSimulationShapes(result: AnalysisResult): SimulationShapes {
   const { mmPerPixel, slot, base, stability } = result;
-  if (!slot || !base || !stability) {
-    throw new Error('buildSimulationShapes requires slot/base/stability result');
-  }
   const baselineY = slot.baseTopYPixel;
 
   const leftPivot: Point = { x: base.supportLeftMm / mmPerPixel, y: baselineY };

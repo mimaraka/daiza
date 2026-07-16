@@ -12,7 +12,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
 import { Button } from '@/components/ui/button';
-import { LocaleContext } from '@/locales';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -24,9 +23,6 @@ interface ErrorBoundaryState {
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  static contextType = LocaleContext;
-  declare context: React.ContextType<typeof LocaleContext>;
-
   state: ErrorBoundaryState = { hasError: false };
 
   /** 子ツリーで投げられた例外を捕捉し、フォールバック表示へ切り替える。 */
@@ -46,22 +42,15 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
     // 一度クラッシュしたツリーは状態が壊れている可能性があるため、部分復帰では
     // なくページ全体の再読み込みで確実に初期状態へ戻す。
-    const t = this.context?.t;
     return (
       <div className="bg-background flex h-svh flex-col items-center justify-center gap-4 p-6 text-center">
         <div className="space-y-1">
-          <h1 className="text-lg font-bold">
-            {t ? t('errorBoundary.title') : 'An unexpected error occurred'}
-          </h1>
+          <h1 className="text-lg font-bold">予期しないエラーが発生しました</h1>
           <p className="text-muted-foreground text-sm">
-            {t
-              ? t('errorBoundary.message')
-              : 'Unable to continue. Please reload the page and try again.'}
+            処理を続行できませんでした。ページを再読み込みしてやり直してください。
           </p>
         </div>
-        <Button onClick={() => window.location.reload()}>
-          {t ? t('errorBoundary.reload') : 'Reload'}
-        </Button>
+        <Button onClick={() => window.location.reload()}>再読み込み</Button>
       </div>
     );
   }

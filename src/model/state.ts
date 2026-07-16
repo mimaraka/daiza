@@ -33,8 +33,6 @@ export interface AppState {
   baseShapeSource: BaseShapeSource | null;
   /** 直近の解析結果。未解析・失敗時は null。 */
   result: AnalysisResult | null;
-  /** 背面アクリル板に貼る画像。3D プレビューのみ使用する表示用アセット。 */
-  backImage: FigureImage | null;
   /** 解析の進行状態。 */
   status: AnalysisStatus;
   /** 直近のエラー。正常時は null。 */
@@ -74,13 +72,6 @@ export const DEFAULT_PARAMETERS: AnalysisParameters = {
   baseDiameterMm: 50,
   basePolygonSides: 6,
   basePolygonRotationDeg: 0,
-  showBackPlate: false,
-  // デザインモードは UI 上のトグル。既定は台座設計。
-  designMode: 'baseFigure',
-  // キーホルダー穴の既定値（ grilling で確定：直径 4 mm、上端余裕 0、水平オフセット 0）。
-  keychainHoleDiameterMm: 4,
-  keychainHolePaddingMm: 0,
-  keychainHoleOffsetXMm: 0,
 };
 
 /**
@@ -201,14 +192,6 @@ export const PARAMETER_CONSTRAINTS = {
   basePolygonSides: { min: 3, max: 12, step: 1 },
   // 回転角。正の向きは方位角（右 0° → 前 90°）と同じ。
   basePolygonRotationDeg: { min: -180, max: 180, step: 1 },
-  // キーホルダー穴の直径。1–10 mm、0.5 mm 刻み（grilling で確定）。
-  keychainHoleDiameterMm: { min: 1, max: 10, step: 0.5 },
-  // キーホルダー穴の上端からの余裕。実効範囲はカットライン高さで決まるため、
-  // ここでは広めの絶対レンジを与え、解析側で余裕内にクランプ・失敗判定する。
-  keychainHolePaddingMm: { min: -50, max: 150, step: 0.5 },
-  // キーホルダー穴の水平オフセット。実効範囲はカットライン幅で決まるため、
-  // ここでは広めの絶対レンジを与え、解析側で余裕内にクランプ・失敗判定する。
-  keychainHoleOffsetXMm: { min: -150, max: 150, step: 0.5 },
 } as const satisfies Record<NumericParameterKey, ParameterConstraint>;
 
 /**
@@ -227,7 +210,6 @@ export const initialAppState: AppState = {
   parameters: DEFAULT_PARAMETERS,
   baseShapeSource: null,
   result: null,
-  backImage: null,
   status: 'idle',
   error: null,
 };
@@ -239,8 +221,6 @@ export const initialAppState: AppState = {
 export type AppAction =
   | { type: 'setImage'; image: FigureImage }
   | { type: 'clearImage' }
-  | { type: 'setBackImage'; image: FigureImage }
-  | { type: 'clearBackImage' }
   | { type: 'updateParameters'; parameters: Partial<AnalysisParameters> }
   | { type: 'setBaseShapeSource'; source: BaseShapeSource }
   | { type: 'analysisStarted' }
@@ -271,19 +251,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         result: null,
         status: 'idle',
         error: null,
-      };
-
-    case 'setBackImage':
-      // 背面画像は表示アセットであり、解析結果には影響しない。
-      return {
-        ...state,
-        backImage: action.image,
-      };
-
-    case 'clearBackImage':
-      return {
-        ...state,
-        backImage: null,
       };
 
     case 'updateParameters':

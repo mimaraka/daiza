@@ -60,9 +60,6 @@ export interface TopViewShapes {
  */
 export function buildTopViewShapes(result: AnalysisResult): TopViewShapes {
   const { slot, base, stability, centroid } = result;
-  if (!slot || !base || !stability) {
-    throw new Error('buildTopViewShapes requires slot/base/stability result');
-  }
   const { footprint } = base;
 
   const slotRect: TopViewRect = {

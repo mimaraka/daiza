@@ -66,19 +66,18 @@ const SVG_SHAPES: Record<string, readonly string[]> = {
 export type BaseShapeSourceResult =
   { ok: true; source: BaseShapeSource } | { ok: false; error: AnalysisError };
 
-import type { AnalysisErrorKind } from '@/model/types';
+/** UI へ提示するエラーメッセージ（日本語）。原因ごとに次の一手が分かる文面にする。 */
+const ERROR_MESSAGES = {
+  unsupported: '対応していないファイルです。台座形状には PNG または SVG を選択してください。',
+  decode: 'ファイルを読み込めませんでした。壊れていないか確認してください。',
+  emptyPng:
+    '台座形状の輪郭を抽出できませんでした。不透明（α>127）な領域を持つ PNG を選択してください。',
+  emptySvg:
+    '台座形状の輪郭を抽出できませんでした。閉じたパス（または rect / circle / ellipse / polygon）を含む SVG を選択してください。',
+} as const;
 
-type BaseShapeErrorKind = Extract<
-  AnalysisErrorKind,
-  | 'baseShapeFailed'
-  | 'baseShapeUnsupported'
-  | 'baseShapeDecodeFailed'
-  | 'baseShapeEmptyPng'
-  | 'baseShapeEmptySvg'
->;
-
-function fail(kind: BaseShapeErrorKind): BaseShapeSourceResult {
-  return { ok: false, error: { kind } };
+function fail(message: string): BaseShapeSourceResult {
+  return { ok: false, error: { kind: 'baseShapeFailed', message } };
 }
 
 /**
@@ -94,7 +93,7 @@ export async function loadBaseShapeSource(file: File): Promise<BaseShapeSourceRe
   if (file.type === 'image/png' || name.endsWith('.png')) {
     return loadPngSource(file);
   }
-  return fail('baseShapeUnsupported');
+  return fail(ERROR_MESSAGES.unsupported);
 }
 
 /**
@@ -109,13 +108,13 @@ async function loadPngSource(file: File): Promise<BaseShapeSourceResult> {
   try {
     bitmap = await createImageBitmap(file);
   } catch {
-    return fail('baseShapeDecodeFailed');
+    return fail(ERROR_MESSAGES.decode);
   }
 
   try {
     const { width, height } = bitmap;
     if (width === 0 || height === 0) {
-      return fail('baseShapeDecodeFailed');
+      return fail(ERROR_MESSAGES.decode);
     }
 
     const canvas = document.createElement('canvas');
@@ -123,7 +122,7 @@ async function loadPngSource(file: File): Promise<BaseShapeSourceResult> {
     canvas.height = height;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
-      return fail('baseShapeDecodeFailed');
+      return fail(ERROR_MESSAGES.decode);
     }
     ctx.drawImage(bitmap, 0, 0);
 
@@ -131,7 +130,7 @@ async function loadPngSource(file: File): Promise<BaseShapeSourceResult> {
     try {
       imageData = ctx.getImageData(0, 0, width, height);
     } catch {
-      return fail('baseShapeDecodeFailed');
+      return fail(ERROR_MESSAGES.decode);
     }
 
     const mask = new Uint8Array(width * height);
@@ -143,7 +142,7 @@ async function loadPngSource(file: File): Promise<BaseShapeSourceResult> {
     const contours = extractContours(mask, width, height);
     const largest = largestByArea(contours);
     if (!largest) {
-      return fail('baseShapeEmptyPng');
+      return fail(ERROR_MESSAGES.emptyPng);
     }
 
     // 画素段差を消す：間引き → 平滑化 → 再間引き（平滑化は頂点を倍増させるため）。
@@ -154,7 +153,7 @@ async function loadPngSource(file: File): Promise<BaseShapeSourceResult> {
     );
 
     const source = normalizeOutline(smoothed, 'png', file.name);
-    return source ? { ok: true, source } : fail('baseShapeEmptyPng');
+    return source ? { ok: true, source } : fail(ERROR_MESSAGES.emptyPng);
   } finally {
     // 台座形状は折れ線として保持するので、ビットマップはここで解放してよい。
     bitmap.close();
@@ -177,12 +176,12 @@ async function loadSvgSource(file: File): Promise<BaseShapeSourceResult> {
   try {
     text = await file.text();
   } catch {
-    return fail('baseShapeDecodeFailed');
+    return fail(ERROR_MESSAGES.decode);
   }
 
   const parsed = new DOMParser().parseFromString(text, 'image/svg+xml');
   if (parsed.getElementsByTagName('parsererror').length > 0) {
-    return fail('baseShapeDecodeFailed');
+    return fail(ERROR_MESSAGES.decode);
   }
 
   const svgNs = 'http://www.w3.org/2000/svg';
@@ -210,7 +209,7 @@ async function loadSvgSource(file: File): Promise<BaseShapeSourceResult> {
     }
   }
   if (geometry.length === 0) {
-    return fail('baseShapeEmptySvg');
+    return fail(ERROR_MESSAGES.emptySvg);
   }
 
   document.body.appendChild(host);
@@ -228,11 +227,11 @@ async function loadSvgSource(file: File): Promise<BaseShapeSourceResult> {
   }
 
   if (!best) {
-    return fail('baseShapeEmptySvg');
+    return fail(ERROR_MESSAGES.emptySvg);
   }
 
   const source = normalizeOutline(removeSelfIntersections(best), 'svg', file.name);
-  return source ? { ok: true, source } : fail('baseShapeEmptySvg');
+  return source ? { ok: true, source } : fail(ERROR_MESSAGES.emptySvg);
 }
 
 /**

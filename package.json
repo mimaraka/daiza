@@ -14,7 +14,6 @@
   "dependencies": {
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",
-    "@react-three/rapier": "^2.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.24.0",
@@ -25,9 +24,6 @@
     "react-dom": "^19.2.7",
     "tailwind-merge": "^3.6.0",
     "three": "^0.185.1"
-  },
-  "overrides": {
-    "@dimforge/rapier3d-compat": "0.19.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

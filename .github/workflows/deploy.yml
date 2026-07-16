@@ -40,14 +40,6 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Create CNAME file
-        env:
-          CNAME: ${{ secrets.CNAME }}
-        run: |
-          if [ -n "$CNAME" ]; then
-            echo "$CNAME" > ./dist/CNAME
-          fi
-
       - name: Setup Pages
         uses: actions/configure-pages@v5
 

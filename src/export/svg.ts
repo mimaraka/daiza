@@ -66,37 +66,25 @@ export function generateSvg(result: AnalysisResult, options: SvgExportOptions = 
     `<path d="${closedCurvePathData(geometry.contour, fmt, { sharpCorners: geometry.sharpCorners })}" ` +
     `fill="none" stroke="${EXPORT_COLORS.contour}" ${strokeAttr} />`;
   // 差込部は首部・ツメの 2 矩形。どちらも外形（カットライン）に含まれるが、加工時に
-  // 差込部だと判別できるよう独立した矩形としても出力する。keychain モードでは存在しない。
-  const neckEl = geometry.neck
-    ? rectElement(
-        geometry.neck,
-        `fill="none" stroke="${EXPORT_COLORS.slot}" ${strokeAttr}`,
-      )
-    : '';
-  const tabEl = geometry.tab
-    ? rectElement(
-        geometry.tab,
-        `fill="none" stroke="${EXPORT_COLORS.slot}" ${strokeAttr}`,
-      )
-    : '';
+  // 差込部だと判別できるよう独立した矩形としても出力する。
+  const neckEl = rectElement(
+    geometry.neck,
+    `fill="none" stroke="${EXPORT_COLORS.slot}" ${strokeAttr}`,
+  );
+  const tabEl = rectElement(
+    geometry.tab,
+    `fill="none" stroke="${EXPORT_COLORS.slot}" ${strokeAttr}`,
+  );
   // 台座は「台座形状」で選んだ footprint の上面図。矩形以外（円・楕円・角丸・任意形状）も
   // カットラインと同じく曲線コマンドで出力する（footprint のパス表現をそのまま写す）。
-  const baseEl = geometry.base
-    ? `<path d="${curvePathData(geometry.base.curve, fmt)}" ` +
-      `fill="none" stroke="${EXPORT_COLORS.base}" ${strokeAttr} />`
-    : '';
+  const baseEl =
+    `<path d="${curvePathData(geometry.base.curve, fmt)}" ` +
+    `fill="none" stroke="${EXPORT_COLORS.base}" ${strokeAttr} />`;
   // 台座に切るスリット（差込口）。台座の内側に置かれるため、台座より後に描いて重ねる。
-  const baseSlotEl = geometry.baseSlot
-    ? rectElement(
-        geometry.baseSlot,
-        `fill="none" stroke="${EXPORT_COLORS.slot}" ${strokeAttr}`,
-      )
-    : '';
-
-  // キーホルダー穴。内側の切り抜き線として contour より後に描く。
-  const holeEl = geometry.hole
-    ? `<circle cx="${fmt(geometry.hole.center.x)}" cy="${fmt(geometry.hole.center.y)}" r="${fmt(geometry.hole.radius)}" fill="none" stroke="rgb(239, 68, 68)" ${strokeAttr} />`
-    : '';
+  const baseSlotEl = rectElement(
+    geometry.baseSlot,
+    `fill="none" stroke="${EXPORT_COLORS.slot}" ${strokeAttr}`,
+  );
 
   // 画像は線データに隠されないよう最背面（先頭）へ。fill/stroke の既定は g に持たせるが、
   // image はそれらの影響を受けないのでグループ内に置いて差し支えない。
@@ -107,8 +95,7 @@ export function generateSvg(result: AnalysisResult, options: SvgExportOptions = 
     tabEl,
     baseEl,
     baseSlotEl,
-    holeEl,
-  ].filter(Boolean);
+  ];
 
   // width/height に "mm" を付け、viewBox の数値を mm と 1:1 対応させて実寸出力とする。
   return [
