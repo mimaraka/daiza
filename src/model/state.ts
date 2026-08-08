@@ -168,7 +168,9 @@ export const PARAMETER_CONSTRAINTS = {
   // 不透明度の割合。判定が「> しきい値」のため 1 では全画素が透明になり解析できないので、
   // 1 段（0.01 = α 2.55 相当）手前を上限に取る。
   alphaThreshold: { min: 0, max: 0.99, step: 0.01 },
-  figureHeightMm: { min: 1, max: 2000, step: 1 },
+  // 実寸スケール(mm/px)を直接決める値なので、1mm 刻みでは細かな指定ができない。
+  // 板厚・差込口幅と同じ 0.1mm 刻み（＝小数第 1 位まで）で指定できるようにする。
+  figureHeightMm: { min: 1, max: 2000, step: 0.1 },
   thicknessMm: { min: 0.1, max: 20, step: 0.1 },
   cutLineMarginMm: { min: 0, max: 10, step: 0.5 },
   cutLineSmoothing: { min: 0, max: 5, step: 1 },
