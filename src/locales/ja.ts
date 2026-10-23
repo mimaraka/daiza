@@ -73,7 +73,7 @@ export const ja: Record<TranslationKey, string> = {
   'result.imageSize': '画像サイズ',
   'result.physicalSize': '実寸',
   'result.dpi': '画像解像度',
-  'result.dpiWarning': '推奨解像度 ({{dpi}}dpi) を下回っています',
+  'result.dpiWarning': '推奨解像度 ({{dpi}} dpi~) を下回っています',
   'result.centroid': '重心座標',
   'result.slotCenter': '差込口中心',
   'result.slotWidth': '差込口幅',

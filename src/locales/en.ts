@@ -73,7 +73,7 @@ export const en = {
   'result.imageSize': 'Image size',
   'result.physicalSize': 'Physical size',
   'result.dpi': 'Image resolution',
-  'result.dpiWarning': 'Below the recommended resolution ({{dpi}} dpi)',
+  'result.dpiWarning': 'Below the recommended resolution ({{dpi}} dpi~)',
   'result.centroid': 'Centroid',
   'result.slotCenter': 'Slot center',
   'result.slotWidth': 'Slot width',

@@ -73,7 +73,7 @@ export const th: Record<TranslationKey, string> = {
   'result.imageSize': 'ขนาดภาพ',
   'result.physicalSize': 'ขนาดจริง',
   'result.dpi': 'ความละเอียดภาพ',
-  'result.dpiWarning': 'ต่ำกว่าความละเอียดที่แนะนำ ({{dpi}} dpi)',
+  'result.dpiWarning': 'ต่ำกว่าความละเอียดที่แนะนำ ({{dpi}} dpi~)',
   'result.centroid': 'จุดศูนย์ถ่วง',
   'result.slotCenter': 'ศูนย์กลางร่องเสียบ',
   'result.slotWidth': 'ความกว้างร่องเสียบ',
