@@ -133,3 +133,9 @@ The cutline is finalized in the following order, and all subsequent centroid, in
 ## Future extensions
 
 Multiple inserts, circular / elliptical / arbitrary base shapes, metal stand support, density maps, multi-PNG simultaneous calculation, PWA / WebAssembly replacement, etc. are anticipated; the analysis logic is kept separate from the UI to support these.
+
+## License
+
+[MIT License](LICENSE) © 2026 mimaraka and contributors
+
+The drawings you create with this app (SVG / .ai cutlines and bases) and the images you load remain yours. The MIT License applies to the source code in this repository.
